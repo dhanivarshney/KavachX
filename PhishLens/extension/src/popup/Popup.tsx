@@ -31,6 +31,8 @@ export function Popup() {
   const [isWebmailTab, setIsWebmailTab] = useState(false);
   const [emailAnalysis, setEmailAnalysis] = useState<any | null>(null);
   const [emailMeta, setEmailMeta] = useState<any | null>(null);
+  const [scanningEmail, setScanningEmail] = useState(false);
+  const [emailNotice, setEmailNotice] = useState<string | null>(null);
 
   useEffect(() => {
     void runAnalysis();
@@ -41,18 +43,200 @@ export function Popup() {
   const signalGroups = analysis ? groupReasonsBySignal(analysis.reasons, analysis.sources, analysis.risk_breakdown) : [];
 
   async function scanWebmailEmail() {
+    setScanningEmail(true);
+    setEmailNotice(null);
+
     try {
       const tab = await getActiveTab();
-      if (!tab?.id) return;
-      const res = (await browser.tabs.sendMessage(tab.id, {
-        type: "KAVACHX_GET_CURRENT_EMAIL_ANALYSIS",
-      })) as { ok?: boolean; analysis?: any; meta?: any } | undefined;
-      if (res?.analysis) {
-        setEmailAnalysis(res.analysis);
-        setEmailMeta(res.meta);
+      if (!tab?.id) {
+        setScanningEmail(false);
+        return;
       }
-    } catch {
-      //
+
+      // Execute live DOM extractor directly inside the active tab
+      const results = await browser.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => {
+          // 1. Subject extraction
+          const subjectEl = document.querySelector(
+            "h2.hP, h2[data-thread-perm-id], div[role='main'] h2, [role='heading'][aria-level='1']"
+          );
+          const subject = subjectEl?.textContent?.trim() || "";
+
+          // 2. Sender extraction
+          let senderEmail = "";
+          let senderName = "";
+
+          const emailAttrEl = document.querySelector("span[email], [email]");
+          if (emailAttrEl) {
+            senderEmail = emailAttrEl.getAttribute("email") || "";
+            senderName = emailAttrEl.getAttribute("name") || emailAttrEl.textContent || "";
+          }
+
+          if (!senderEmail || !senderEmail.includes("@")) {
+            const hovercards = Array.from(document.querySelectorAll("[data-hovercard-id*='@']"));
+            if (hovercards.length > 0) {
+              senderEmail = hovercards[0].getAttribute("data-hovercard-id") || "";
+              senderName = senderName || hovercards[0].textContent || "";
+            }
+          }
+
+          if (!senderEmail || !senderEmail.includes("@")) {
+            const gd = document.querySelector(".gD");
+            if (gd) {
+              senderEmail = gd.getAttribute("email") || gd.getAttribute("data-hovercard-id") || "";
+              senderName = senderName || gd.textContent || "";
+            }
+          }
+
+          if (!senderEmail || !senderEmail.includes("@")) {
+            const allText = (document.querySelector("div[role='main']") as HTMLElement)?.innerText || document.body.innerText;
+            const match = allText.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+            if (match) {
+              senderEmail = match[0];
+            }
+          }
+
+          if (!senderName) {
+            const nameEl = document.querySelector("span.gD, h3.iw, span[name]");
+            senderName = nameEl?.getAttribute("name") || nameEl?.textContent?.trim() || "";
+          }
+
+          // 3. Body extraction
+          const bodyEl = document.querySelector(
+            "div.a3s, .a3s.aiL, div.ii.gt, div[aria-label='Message body'], #UniqueMessageBody, div.rps_"
+          );
+          const bodySnippet = (bodyEl as HTMLElement)?.innerText?.slice(0, 1500) || "";
+
+          // 4. Links extraction
+          const links: string[] = [];
+          if (bodyEl) {
+            bodyEl.querySelectorAll("a[href]").forEach((a) => {
+              const href = (a as HTMLAnchorElement).href;
+              if (
+                href &&
+                (href.startsWith("http://") || href.startsWith("https://")) &&
+                !href.includes("mail.google.com") &&
+                !href.includes("outlook.live.com")
+              ) {
+                links.push(href);
+              }
+            });
+          }
+
+          return {
+            found: Boolean(bodySnippet || senderEmail || subject),
+            senderName: senderName.replace(/<[^>]+>/g, "").trim(),
+            senderEmail: senderEmail.replace(/<|>/g, "").trim(),
+            subject,
+            bodySnippet,
+            links,
+          };
+        },
+      });
+
+      const extracted = results?.[0]?.result as
+        | {
+            found: boolean;
+            senderName: string;
+            senderEmail: string;
+            subject: string;
+            bodySnippet: string;
+            links: string[];
+          }
+        | undefined;
+
+      if (!extracted || !extracted.found || (!extracted.bodySnippet && !extracted.senderEmail)) {
+        setEmailNotice("Open an email thread in Gmail first, then click Scan.");
+        setScanningEmail(false);
+        return;
+      }
+
+      const meta = {
+        senderName: extracted.senderName || "Unknown Sender",
+        senderEmail: extracted.senderEmail || "notifications@service.com",
+        subject: extracted.subject || "Open Email",
+        linksCount: extracted.links.length,
+      };
+      setEmailMeta(meta);
+
+      // Analyze via backend API
+      try {
+        const response = await fetch("http://localhost:8000/analyze/email", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sender_name: meta.senderName,
+            sender_email: meta.senderEmail,
+            subject: meta.subject,
+            body_snippet: extracted.bodySnippet,
+            links: extracted.links,
+          }),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          setEmailAnalysis(data);
+
+          // Inject or refresh security banner in the Gmail tab
+          await browser.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: (analysisData: any) => {
+              const bodyEl = document.querySelector("div.a3s, .a3s.aiL, div.ii.gt");
+              if (!bodyEl) return;
+              const existing = bodyEl.querySelector(".kavachx-injected-banner");
+              if (existing) existing.remove();
+
+              const banner = document.createElement("div");
+              banner.className = "kavachx-injected-banner";
+              const isDanger = analysisData.risk_label === "dangerous";
+              const isSusp = analysisData.risk_label === "suspicious";
+
+              banner.style.cssText = `
+                background: ${isDanger ? "#fff1f2" : isSusp ? "#fffbeb" : "#f0fdf4"} !important;
+                border: 2px solid ${isDanger ? "#fecdd3" : isSusp ? "#fde68a" : "#bbf7d0"} !important;
+                border-radius: 10px !important;
+                padding: 12px 16px !important;
+                margin: 10px 0 14px 0 !important;
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.06) !important;
+                display: block !important;
+                z-index: 99999 !important;
+              `;
+
+              banner.innerHTML = `
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                  <span style="font-weight:800; font-size:13px; color:#0f172a;">🛡️ KavachX: <span style="color:${
+                    isDanger ? "#be123c" : isSusp ? "#b45309" : "#15803d"
+                  };">${analysisData.safety_summary}</span></span>
+                  <span style="font-size:10px; font-weight:800; padding:2px 8px; border-radius:9999px; background:${
+                    isDanger ? "#ffe4e6" : isSusp ? "#fef3c7" : "#dcfce7"
+                  }; color:${
+                isDanger ? "#be123c" : isSusp ? "#b45309" : "#15803d"
+              }; text-transform:uppercase;">Score ${analysisData.threat_score}/100</span>
+                </div>
+                <div style="font-size:12px; color:#334155; line-height:1.4;">${analysisData.ai_advice}</div>
+                <div style="font-size:11px; color:#64748b; margin-top:4px;">Domain Audit: ${
+                  analysisData.sender_audit.details
+                } • ${analysisData.embedded_links.length} links inspected</div>
+              `;
+
+              if (bodyEl.firstChild) {
+                bodyEl.insertBefore(banner, bodyEl.firstChild);
+              } else {
+                bodyEl.appendChild(banner);
+              }
+            },
+            args: [data],
+          });
+        }
+      } catch (backendErr) {
+        setEmailNotice("Backend offline. Make sure uvicorn is running on port 8000.");
+      }
+    } catch (err: any) {
+      setEmailNotice(err?.message || "Failed to scan email.");
+    } finally {
+      setScanningEmail(false);
     }
   }
 
@@ -75,18 +259,9 @@ export function Popup() {
       );
       setIsWebmailTab(isWebmail);
 
-      if (isWebmail && tab?.id) {
-        try {
-          const res = (await browser.tabs.sendMessage(tab.id, {
-            type: "KAVACHX_GET_CURRENT_EMAIL_ANALYSIS",
-          })) as { ok?: boolean; analysis?: any; meta?: any } | undefined;
-          if (res?.analysis) {
-            setEmailAnalysis(res.analysis);
-            setEmailMeta(res.meta);
-          }
-        } catch {
-          //
-        }
+      if (isWebmail) {
+        // Proactively scan open email right away
+        void scanWebmailEmail();
       }
 
       if (!tab?.id || !url || !url.startsWith("http")) {
@@ -238,20 +413,39 @@ export function Popup() {
             <button
               type="button"
               onClick={scanWebmailEmail}
+              disabled={scanningEmail}
               style={{
                 fontSize: "11px",
                 fontWeight: 600,
-                background: "#2563eb",
+                background: scanningEmail ? "#94a3b8" : "#2563eb",
                 color: "#fff",
                 border: "none",
                 borderRadius: "5px",
-                padding: "3px 8px",
-                cursor: "pointer",
+                padding: "4px 10px",
+                cursor: scanningEmail ? "wait" : "pointer",
+                transition: "background 0.2s",
               }}
             >
-              🔄 Scan Open Email
+              {scanningEmail ? "⏳ Scanning Email..." : "🔄 Scan Open Email"}
             </button>
           </div>
+
+          {emailNotice && (
+            <div
+              style={{
+                background: "#fef3c7",
+                border: "1px solid #fde68a",
+                borderRadius: "6px",
+                padding: "6px 10px",
+                fontSize: "11px",
+                color: "#92400e",
+                marginBottom: "8px",
+                fontWeight: 600,
+              }}
+            >
+              ⚠️ {emailNotice}
+            </div>
+          )}
 
           {emailAnalysis ? (
             <div

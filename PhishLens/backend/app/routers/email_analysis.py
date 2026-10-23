@@ -66,6 +66,11 @@ KNOWN_BRAND_DOMAINS: dict[str, list[str]] = {
     "fedex": ["fedex.com"],
     "dhl": ["dhl.com"],
     "income tax": ["incometax.gov.in"],
+    "vercel": ["vercel.com", "vercel.app"],
+    "github": ["github.com"],
+    "linkedin": ["linkedin.com"],
+    "twitter": ["twitter.com", "x.com"],
+    "dropbox": ["dropbox.com"],
 }
 
 FREEMAIL_DOMAINS = {
