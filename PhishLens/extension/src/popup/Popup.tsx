@@ -493,83 +493,107 @@ export function Popup() {
           )}
 
           {emailAnalysis ? (
-            <div
-              style={{
-                fontSize: "11px",
-                color: "#334155",
-                display: "flex",
-                flexDirection: "column",
-                gap: "6px",
-              }}
-            >
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                }}
-              >
-                <span>
-                  <strong>Status:</strong> {emailAnalysis.safety_summary}
+            <div style={{ fontSize: "11px", color: "#334155", display: "flex", flexDirection: "column", gap: "7px" }}>
+              {/* Score + status bar */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ fontWeight: 700, fontSize: "12px" }}>
+                  {emailAnalysis.safety_summary}
                 </span>
-                <span
-                  style={{
-                    padding: "2px 7px",
-                    borderRadius: "9999px",
-                    fontWeight: 800,
-                    fontSize: "10px",
-                    background:
-                      emailAnalysis.risk_label === "dangerous"
-                        ? "#ffe4e6"
-                        : emailAnalysis.risk_label === "suspicious"
-                        ? "#fef3c7"
-                        : "#dcfce7",
-                    color:
-                      emailAnalysis.risk_label === "dangerous"
-                        ? "#be123c"
-                        : emailAnalysis.risk_label === "suspicious"
-                        ? "#b45309"
-                        : "#15803d",
-                  }}
-                >
-                  Score {emailAnalysis.threat_score}/100
+                <span style={{
+                  padding: "2px 8px",
+                  borderRadius: "9999px",
+                  fontWeight: 800,
+                  fontSize: "10px",
+                  background: emailAnalysis.risk_label === "dangerous" ? "#ffe4e6" : emailAnalysis.risk_label === "suspicious" ? "#fef3c7" : "#dcfce7",
+                  color: emailAnalysis.risk_label === "dangerous" ? "#be123c" : emailAnalysis.risk_label === "suspicious" ? "#b45309" : "#15803d",
+                }}>
+                  {emailAnalysis.threat_score}/100
                 </span>
               </div>
+
+              {/* Score progress bar */}
+              <div style={{ height: "6px", borderRadius: "9999px", background: "#e2e8f0", overflow: "hidden" }}>
+                <div style={{
+                  height: "100%",
+                  width: `${emailAnalysis.threat_score}%`,
+                  background: emailAnalysis.risk_label === "dangerous" ? "#be123c" : emailAnalysis.risk_label === "suspicious" ? "#d97706" : "#16a34a",
+                  borderRadius: "9999px",
+                  transition: "width 0.4s ease",
+                }} />
+              </div>
+
+              {/* Signal breakdown */}
+              {emailAnalysis.signal_breakdown && (
+                <div style={{ background: "#f8fafc", borderRadius: "8px", padding: "8px", border: "1px solid #e2e8f0" }}>
+                  <div style={{ fontWeight: 700, marginBottom: "5px", fontSize: "10px", textTransform: "uppercase", letterSpacing: "0.05em", color: "#64748b" }}>
+                    Signal Breakdown
+                  </div>
+                  {[
+                    { key: "sender_domain_signals", label: "Sender Domain" },
+                    { key: "subject_signals", label: "Subject" },
+                    { key: "body_language_signals", label: "Body Language" },
+                    { key: "link_threat_signals", label: "Embedded Links" },
+                  ].map(({ key, label }) => {
+                    const val = (emailAnalysis.signal_breakdown as any)[key] as number;
+                    const pct = Math.min((val / 45) * 100, 100);
+                    const barColor = val >= 25 ? "#be123c" : val >= 10 ? "#d97706" : "#16a34a";
+                    return (
+                      <div key={key} style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "3px" }}>
+                        <span style={{ width: "85px", flexShrink: 0, color: "#475569" }}>{label}</span>
+                        <div style={{ flex: 1, height: "5px", background: "#e2e8f0", borderRadius: "9999px", overflow: "hidden" }}>
+                          <div style={{ width: `${pct}%`, height: "100%", background: barColor, borderRadius: "9999px" }} />
+                        </div>
+                        <span style={{ width: "22px", textAlign: "right", fontWeight: 700, color: barColor }}>{val}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Sender info */}
               {emailMeta && (
-                <>
-                  <div>
-                    <strong>Sender:</strong> {emailMeta.senderName || "Unknown"} (
-                    {emailMeta.senderEmail})
-                  </div>
-                  <div>
-                    <strong>Subject:</strong> {emailMeta.subject || "No Subject"}
-                  </div>
-                  <div>
-                    <strong>Embedded Links:</strong> {emailMeta.linksCount} found
-                  </div>
-                </>
+                <div style={{ background: "#f1f5f9", borderRadius: "7px", padding: "7px 9px", lineHeight: 1.5 }}>
+                  <div><strong>From:</strong> {emailMeta.senderName || "—"} &lt;{emailMeta.senderEmail || "unknown"}&gt;</div>
+                  <div><strong>Subject:</strong> {emailMeta.subject || "(No Subject)"}</div>
+                  <div><strong>Links found:</strong> {emailMeta.linksCount}</div>
+                </div>
               )}
+
+              {/* Spoofing warning */}
               {emailAnalysis.sender_audit?.is_spoofed && (
-                <div style={{ color: "#b91c1c", fontWeight: 700 }}>
-                  ⚠️ Impersonation: {emailAnalysis.sender_audit.details}
+                <div style={{ color: "#b91c1c", fontWeight: 700, background: "#fff1f2", padding: "6px 8px", borderRadius: "6px", border: "1px solid #fecdd3" }}>
+                  🚨 Impersonation Detected: {emailAnalysis.sender_audit.details}
                 </div>
               )}
+
+              {/* Sender domain note (non-spoofed) */}
+              {!emailAnalysis.sender_audit?.is_spoofed && emailAnalysis.sender_audit?.details && (
+                <div style={{ color: "#475569", fontSize: "10px" }}>
+                  🔍 Domain: {emailAnalysis.sender_audit.details}
+                </div>
+              )}
+
+              {/* Detected traps */}
               {emailAnalysis.detected_traps?.length > 0 && (
-                <div style={{ color: "#9a3412", fontWeight: 600 }}>
-                  ⚡ Traps: {emailAnalysis.detected_traps.join(", ")}
+                <div style={{ color: "#9a3412", fontWeight: 600, background: "#fff7ed", padding: "6px 8px", borderRadius: "6px", border: "1px solid #fed7aa" }}>
+                  ⚡ Phishing Signals: {emailAnalysis.detected_traps.join(" • ")}
                 </div>
               )}
-              <div>
-                <strong>Advice:</strong> {emailAnalysis.ai_advice}
+
+              {/* AI Advice */}
+              <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "7px", padding: "7px 9px", lineHeight: 1.5, color: "#1e293b" }}>
+                {emailAnalysis.ai_advice}
               </div>
-              <div style={{ marginTop: "6px" }}>
+
+              {/* SOS button */}
+              <div>
                 <a
-                  href="http://localhost:5173/#/damage-control"
+                  href="http://localhost:5173/damage-control"
                   target="_blank"
                   rel="noreferrer"
                   style={{
                     display: "inline-block",
-                    padding: "4px 10px",
+                    padding: "5px 12px",
                     background: "#e11d48",
                     color: "#fff",
                     textDecoration: "none",
@@ -589,6 +613,7 @@ export function Popup() {
           )}
         </section>
       )}
+
 
       <section
         className={`risk-panel ${analysis?.label ?? "safe"}`}
