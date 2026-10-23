@@ -59,7 +59,8 @@
         "https://outlook.office365.com/*"
       ],
       "js": ["content/email-guardian.js"],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "all_frames": true
     }
   ]
 }

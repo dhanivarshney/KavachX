@@ -40,6 +40,26 @@ browser.runtime.onMessage.addListener((rawMessage: unknown, sender: { tab?: { id
     return Promise.resolve({ ok: true });
   }
 
+  if (message?.type === "KAVACHX_ANALYZE_EMAIL") {
+    const emailPayload = (rawMessage as { type: string; payload: unknown }).payload;
+    return (async () => {
+      try {
+        const response = await fetch("http://localhost:8000/analyze/email", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(emailPayload),
+        });
+        if (response.ok) {
+          const data = await response.json();
+          return { ok: true, data };
+        }
+        return { ok: false, error: `Backend returned HTTP ${response.status}` };
+      } catch (err: unknown) {
+        return { ok: false, error: err instanceof Error ? err.message : "Network error" };
+      }
+    })();
+  }
+
   if (message?.type === "PHISHLENS_PAGE_READY" && sender.tab?.id !== undefined) {
     const tabId = sender.tab.id;
     const url = typeof message.url === "string" ? message.url : "";
