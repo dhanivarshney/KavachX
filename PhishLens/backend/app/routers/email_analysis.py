@@ -1,4 +1,4 @@
-"""KavachX Email Phishing & Spoofing Analysis Engine — v3 (Gmail-signal-aware)."""
+"""KavachX Email Phishing & Spoofing Analysis Engine — v4 (context-aware, low false positives)."""
 
 import re
 from urllib.parse import urlparse
@@ -20,7 +20,6 @@ class EmailAnalysisRequest(BaseModel):
     subject: str | None = ""
     body_snippet: str | None = ""
     links: list[str] = []
-    # Gmail-native signals (sent by extension)
     is_spam_folder: bool = False
     gmail_flagged_phishing: bool = False
     via_domain: str | None = ""
@@ -45,26 +44,64 @@ class SenderAudit(BaseModel):
 
 class EmailAnalysisResponse(BaseModel):
     threat_score: int
-    risk_label: str          # safe | suspicious | dangerous
+    risk_label: str
     confidence: float
     sender_audit: SenderAudit
     detected_traps: list[str]
     embedded_links: list[ExtractedLinkResult]
     ai_advice: str
     safety_summary: str
-    banner_color: str        # rose | amber | emerald
+    banner_color: str
     signal_breakdown: dict
 
 
-# ── Static data ───────────────────────────────────────────────────────────────
+# ── TRUSTED domains — these get a score REDUCTION ────────────────────────────
+# Add any domain here that is a known legitimate sender.
+# Trust bonus: -25 applied after all other scoring.
+TRUSTED_DOMAINS: set[str] = {
+    # Job portals
+    "naukri.com", "naukricampus.com", "shine.com", "monster.com",
+    "indeed.com", "glassdoor.com", "internshala.com", "letsintern.com",
+    "hirist.com", "foundit.in", "apna.co", "cutshort.io",
+    # LinkedIn / professional
+    "linkedin.com", "e.linkedin.com", "em.linkedin.com",
+    # GitHub / developer tools
+    "github.com", "notifications.github.com",
+    # Google services
+    "google.com", "google.co.in", "accounts.google.com", "googlemail.com",
+    "workspace.google.com",
+    # Microsoft
+    "microsoft.com", "office.com", "teams.microsoft.com",
+    # Colleges/edu (handled by suffix below)
+    # Payment + fintech (legit)
+    "razorpay.com", "cashfree.com", "billdesk.com", "payu.in",
+    # Indian banks (official)
+    "sbi.co.in", "hdfcbank.com", "icicibank.com", "axisbank.com",
+    "kotakbank.com", "onlinesbi.sbi",
+    # Govt India
+    "gov.in", "nic.in", "uidai.gov.in", "incometax.gov.in",
+    # Large corps
+    "amazon.com", "amazon.in", "flipkart.com", "zomato.com",
+    "swiggy.com", "ola.com", "uber.com",
+    "infosys.com", "tcs.com", "wipro.com", "hcl.com", "accenture.com",
+    "ibm.com", "oracle.com", "salesforce.com", "adobe.com",
+    "zoho.com", "freshworks.com", "atlassian.com",
+    # FOSS / developer
+    "gitlab.com", "bitbucket.org", "npmjs.com", "pypi.org",
+    # Comms
+    "slack.com", "zoom.us", "notion.so", "trello.com",
+    # Email infra of trusted senders
+    "naukricampus.com", "talent.naukri.com",
+}
 
+# ── KNOWN BRAND domains (for spoofing detection) ──────────────────────────────
 KNOWN_BRAND_DOMAINS: dict[str, list[str]] = {
     "paypal": ["paypal.com", "paypal.me"],
     "google": ["google.com", "google.co.in", "gmail.com", "accounts.google.com", "googlemail.com"],
     "apple": ["apple.com", "icloud.com"],
     "netflix": ["netflix.com"],
     "amazon": ["amazon.com", "amazon.in"],
-    "microsoft": ["microsoft.com", "office.com", "outlook.com", "live.com", "hotmail.com"],
+    "microsoft": ["microsoft.com", "office.com", "outlook.com", "live.com"],
     "sbi": ["sbi.co.in", "onlinesbi.sbi"],
     "hdfc": ["hdfcbank.com", "hdfc.com"],
     "icici": ["icicibank.com"],
@@ -72,13 +109,12 @@ KNOWN_BRAND_DOMAINS: dict[str, list[str]] = {
     "kotak": ["kotak.com", "kotakbank.com"],
     "facebook": ["facebook.com", "meta.com", "fb.com"],
     "instagram": ["instagram.com"],
+    "linkedin": ["linkedin.com", "e.linkedin.com", "em.linkedin.com"],
     "india post": ["indiapost.gov.in"],
     "fedex": ["fedex.com"],
     "dhl": ["dhl.com"],
     "income tax": ["incometax.gov.in"],
-    "vercel": ["vercel.com", "vercel.app"],
-    "github": ["github.com"],
-    "linkedin": ["linkedin.com", "e.linkedin.com"],
+    "github": ["github.com", "notifications.github.com"],
     "twitter": ["twitter.com", "x.com"],
     "dropbox": ["dropbox.com"],
     "paytm": ["paytm.com"],
@@ -86,73 +122,102 @@ KNOWN_BRAND_DOMAINS: dict[str, list[str]] = {
     "irctc": ["irctc.co.in"],
     "uidai": ["uidai.gov.in"],
     "zomato": ["zomato.com"],
-    "swiggy": ["swiggy.com"],
     "flipkart": ["flipkart.com"],
-    "myntra": ["myntra.com"],
+    "naukri": ["naukri.com", "naukricampus.com", "iimjobs.com"],
+    "infosys": ["infosys.com"],
+    "tcs": ["tcs.com"],
+    "wipro": ["wipro.com"],
+    "razorpay": ["razorpay.com"],
 }
 
-FREEMAIL_DOMAINS = {
-    "gmail.com", "yahoo.com", "ymail.com", "hotmail.com",
-    "outlook.com", "live.com", "aol.com", "protonmail.com",
-    "zoho.com", "mail.com", "icloud.com", "rediffmail.com",
-    "yahoo.in", "yahoo.co.in",
-}
-
-# Bulk-mailer / ESP sending domains — legit when configured, abused in spam/phishing
-BULK_MAILER_DOMAINS = {
+# Bulk-mail platforms — legitimate when used by trusted brands, abused by spammers
+BULK_MAILER_DOMAINS: set[str] = {
     "brevosend.com", "sendinblue.com", "mailchimp.com", "sendgrid.net",
     "amazonses.com", "mailgun.org", "postmarkapp.com", "sparkpostmail.com",
     "mandrillapp.com", "constantcontact.com", "klaviyomail.com",
-    "hubspotemail.net", "createsend.com", "em.mailer.com", "mg.mailer.com",
-    "mailjet.com", "elasticemail.com", "moosend.com", "campaignmonitor.com",
+    "hubspotemail.net", "createsend.com", "mailjet.com",
+    "elasticemail.com", "moosend.com",
 }
 
-# TLDs overwhelmingly used in phishing
-SUSPICIOUS_TLDS = {
+FREEMAIL_DOMAINS: set[str] = {
+    "gmail.com", "yahoo.com", "ymail.com", "hotmail.com",
+    "outlook.com", "live.com", "aol.com", "protonmail.com",
+    "mail.com", "rediffmail.com", "yahoo.in", "yahoo.co.in",
+}
+
+SUSPICIOUS_TLDS: set[str] = {
     ".tk", ".ml", ".ga", ".cf", ".gq", ".xyz", ".top", ".club",
     ".online", ".site", ".website", ".fun", ".press", ".space",
-    ".info", ".buzz", ".click", ".link", ".live", ".world",
+    ".buzz", ".click", ".link", ".live", ".world",
 }
 
-# Enterprise-sounding words that should NEVER use freemail / bulk-mailer
 ENTERPRISE_KEYWORDS = [
-    "support", "service", "security", "helpdesk", "desk",
-    "billing", "official", "bank", "finance", "account", "admin",
-    "noreply", "no-reply", "verify", "verification", "team", "alert",
-    "kyc", "aadhaar", "pan", "irs", "tax", "government", "gov",
-    "it department", "hr department", "payroll", "compliance",
+    "support", "service", "security", "helpdesk", "billing", "official",
+    "bank", "finance", "account", "admin", "noreply", "no-reply",
+    "verify", "verification", "alert", "kyc", "aadhaar", "pan",
+    "irs", "tax", "government", "gov", "compliance",
 ]
 
-# Urgency/lure patterns → (regex, label, weight)
+# ── SAFE CONTEXT patterns — if these match, cancel a specific phishing pattern ──
+# Format: (safe_pattern, list_of_trap_labels_it_cancels)
+SAFE_CONTEXT_PATTERNS: list[tuple[str, list[str]]] = [
+    # Internship / job offer context — "selected" / "congratulations" are normal
+    (
+        r"(internship|job offer|offer letter|appointment|joining|campus|placement|recruit|hired|position|role|interview)",
+        ["Prize/Lottery/Refund Hook", "Prize/Reward lure in subject", "Prize/reward lure in subject",
+         "Prize / Lottery / Refund Hook"],
+    ),
+    # OTP from bank own domain — legitimate 2FA
+    (
+        r"(your (otp|one.?time password|verification code) (is|:|for))",
+        ["OTP / Password Solicitation"],
+    ),
+    # Newsletter / marketing unsubscribe footer — normal for legit mailers
+    (
+        r"(unsubscribe|manage (your )?(preferences|subscription)|email preferences|update preferences)",
+        ["Generic Salutation (Impersonation Signal)"],
+    ),
+    # Transactional delivery context — "order", "shipment" from known e-commerce
+    (
+        r"(order (confirmed|placed|shipped|dispatched|delivered)|track (your )?(order|package|shipment))",
+        ["Fake Delivery / Package Scam"],
+    ),
+    # Password reset that YOU initiated — subject says "you requested"
+    (
+        r"(you (recently )?(requested|initiated|triggered)|if you did not request)",
+        ["OTP/password reset lure in subject"],
+    ),
+]
+
+# ── URGENCY / LURE patterns — (regex, label, weight) ─────────────────────────
 URGENCY_PATTERNS: list[tuple[str, str, int]] = [
     (r"(account|subscription|service|membership)\s*(has been|is|will be)\s*(suspended|terminated|deactivated|blocked|cancelled)",
-     "Account Suspension / Termination Threat", 15),
+     "Account Suspension/Termination Threat", 15),
     (r"(unauthorized|suspicious|unknown|unusual)\s*(sign.?in|login|activity|transaction|access|attempt)",
      "Fabricated Security Alert", 12),
-    (r"(confirm|verify|update|validate|re-?verify)\s*(your)?\s*(identity|account|billing|card|password|ssn|pan|kyc|aadhaar|details|information)",
-     "Credential / KYC Demand", 15),
-    (r"(immediate action required|act now|within 24 hours|within 48 hours|within 12 hours|urgent response|final warning|last notice|last chance|expires today|expiring soon)",
+    (r"(confirm|verify|update|validate|re-?verify)\s*(your)?\s*(identity|account|billing|card|password|ssn|pan|kyc|aadhaar|details)",
+     "Credential/KYC Verification Demand", 15),
+    (r"(immediate action required|act now|within 24 hours|within 48 hours|urgent response|final warning|last notice|last chance|expires today|expiring soon)",
      "False Urgency Countdown", 12),
-    (r"(invoice|receipt|order confirmed|payment receipt|purchase)\s*#?[0-9a-zA-Z\-]+.*(\$|rs\.?|₹|usd|inr)",
-     "Fake Invoice / Purchase Bait", 10),
-    (r"(won|winner|lottery|prize|lucky|refund approved|tax refund|unclaimed|reward|congratulations.*selected|selected.*lucky)",
-     "Prize / Lottery / Refund Hook", 15),
-    (r"(click here|click the link|click below|click on this)\s*(to|and)?\s*(verify|confirm|update|activate|secure|claim|access)",
+    (r"(invoice|receipt|order confirmed|payment receipt)\s*#?[0-9a-zA-Z\-]+.*(\$|rs\.?|₹|usd|inr)(?!.*track)",
+     "Fake Invoice/Purchase Bait", 10),
+    # Prize pattern — but only when NOT in job context (we cancel it with SAFE_CONTEXT_PATTERNS above)
+    (r"(won|winner|lottery|prize|lucky draw|refund approved|tax refund|unclaimed reward|kbc|kaun banega)",
+     "Prize/Lottery/Refund Hook", 15),
+    (r"(click here|click the link|click below)\s*(to|and)?\s*(verify|confirm|update|activate|secure|claim)",
      "Deceptive CTA (Click to Verify)", 10),
-    (r"(your (account|card|funds|money)\s*(will be|will|is being|has been)\s*(blocked|frozen|charged|debited|suspended|deactivated))",
-     "Financial Fear Threat", 15),
-    (r"(share|provide|send|give|enter)\s*(your)?\s*(otp|one.?time|pin|password|cvv|card number)",
+    (r"(your (account|card|funds|money)\s*(will be|has been|is being)\s*(blocked|frozen|charged|debited|suspended))",
+     "Financial Fear/Freeze Threat", 15),
+    (r"(share|provide|send|give|enter)\s*(your)?\s*(otp|one.?time|pin|cvv|card number)(?!.*is\s+\d)",
      "OTP / Password Solicitation", 20),
-    (r"(dear (customer|user|member|sir|ma'?am|valued client)|respected (customer|user|member))",
-     "Generic Salutation (Impersonation Signal)", 5),
-    (r"(your (package|parcel|shipment|delivery|order)\s*(is|has been|will be)\s*(held|delayed|pending|stopped|on hold))",
-     "Fake Delivery / Package Scam", 12),
-    (r"(remote\s*(access|desktop|session|control)|anydesk|teamviewer|quick\s*support|screen\s*share)",
-     "Remote Access / RAT Request", 20),
-    (r"(free (iphone|gift card|voucher|recharge|data|subscription|reward))",
+    (r"(remote\s*(access|desktop|session|control)|anydesk|teamviewer|quick\s*support)",
+     "Remote Access / RAT Request", 25),
+    (r"(free (iphone|gift card|voucher|recharge|data)(?!.*plan|.*service))",
      "Free Gift Lure", 10),
-    (r"(kbc|kaun banega|crorepati|jio\s*lottery|airtel\s*lottery|bsnl\s*lottery)",
-     "KBC / Telecom Lottery Scam (India)", 18),
+    (r"(dear (customer|user|member|sir|ma'?am|valued client)|respected (customer|user|member))\b(?!.*team|.*campus|.*naukri)",
+     "Generic Salutation (Impersonation Signal)", 5),
+    (r"(your (package|parcel|shipment)\s*(is|has been)\s*(held|delayed|stopped|pending customs))",
+     "Fake Delivery/Package Scam", 12),
 ]
 
 
@@ -172,26 +237,61 @@ def _get_tld(domain: str) -> str:
     return "." + parts[-1] if len(parts) > 1 else ""
 
 
+def _base_domain(domain: str) -> str:
+    """Extract registrable domain: 'mail.naukri.com' → 'naukri.com'."""
+    parts = domain.split(".")
+    if len(parts) >= 2:
+        # Handle .co.in, .gov.in, .ac.in style
+        if len(parts) >= 3 and parts[-2] in ("co", "gov", "ac", "org", "net", "edu"):
+            return ".".join(parts[-3:])
+        return ".".join(parts[-2:])
+    return domain
+
+
+def _is_trusted(domain: str) -> bool:
+    """True if domain or its base domain is in TRUSTED_DOMAINS, or has .edu/.gov/.ac.in TLD."""
+    base = _base_domain(domain)
+    if base in TRUSTED_DOMAINS or domain in TRUSTED_DOMAINS:
+        return True
+    # Government / academic TLDs
+    if domain.endswith(".gov.in") or domain.endswith(".nic.in") or \
+       domain.endswith(".ac.in") or domain.endswith(".edu.in") or \
+       domain.endswith(".edu"):
+        return True
+    return False
+
+
 def _has_numeric_subdomain(domain: str) -> bool:
     parts = domain.split(".")
     return len(parts) >= 3 and parts[0].isdigit()
 
 
 def _domain_looks_throwaway(domain: str) -> bool:
-    """Detect randomly generated / throwaway subdomains."""
     parts = domain.split(".")
     if len(parts) >= 3:
         sub = parts[0]
-        # Hex hash subdomains (e.g. a3f2b1c7.brevosend.com)
         if len(sub) >= 6 and re.match(r'^[a-f0-9]+$', sub):
             return True
-        # Long random alphanumeric
         if len(sub) >= 12:
             consonant_ratio = sum(1 for c in sub if c in "bcdfghjklmnpqrstvwxyz") / len(sub)
             if consonant_ratio > 0.65:
                 return True
     return False
 
+
+def _apply_safe_context(traps: list[str], combined_text: str) -> list[str]:
+    """
+    Remove trap labels that are cancelled by safe context patterns.
+    e.g. 'Prize/Lottery Hook' cancelled when body talks about internship/job offers.
+    """
+    active_traps = list(traps)
+    for safe_pattern, cancels in SAFE_CONTEXT_PATTERNS:
+        if re.search(safe_pattern, combined_text, re.IGNORECASE):
+            active_traps = [t for t in active_traps if t not in cancels]
+    return active_traps
+
+
+# ── Sender audit ──────────────────────────────────────────────────────────────
 
 def _audit_sender(
     sender_name: str,
@@ -200,22 +300,21 @@ def _audit_sender(
     via_domain: str,
     reply_to: str,
 ) -> tuple[SenderAudit, int, list[str]]:
-    """
-    Returns (SenderAudit, score_contribution, trap_labels_from_sender).
-    """
     name_clean = (sender_name or "").lower()
     subj_clean = (subject or "").lower()
     domain = _extract_domain(sender_email)
+    base = _base_domain(domain)
     tld = _get_tld(domain)
     score = 0
     flags: list[str] = []
     traps: list[str] = []
 
-    is_freemail = domain in FREEMAIL_DOMAINS
+    trusted = _is_trusted(domain)
+    is_freemail = base in FREEMAIL_DOMAINS
     is_bulk = any(domain == b or domain.endswith("." + b) for b in BULK_MAILER_DOMAINS)
 
-    # ── Brand impersonation check ──────────────────────────────────────────────
-    claimed_brand = None
+    # ── Brand impersonation ────────────────────────────────────────────────────
+    claimed_brand: str | None = None
     for brand in KNOWN_BRAND_DOMAINS:
         if brand in name_clean or brand in subj_clean:
             claimed_brand = brand
@@ -225,72 +324,87 @@ def _audit_sender(
     if claimed_brand:
         allowed = KNOWN_BRAND_DOMAINS[claimed_brand]
         matched = any(domain == d or domain.endswith("." + d) for d in allowed)
-        if not matched:
+        # Also trust if via_domain matches allowed (e.g. LinkedIn via em.linkedin.com)
+        via_matched = via_domain and any(
+            via_domain == d or via_domain.endswith("." + d) for d in allowed
+        )
+        if not matched and not via_matched:
             is_spoofed = True
             score += 50
-            traps.append(f"Brand impersonation — '{claimed_brand.title()}' claimed, sending from '{domain}'")
+            traps.append(f"Brand impersonation — '{claimed_brand.title()}' claimed, email from '{domain}'")
             flags.append(f"Display name claims '{claimed_brand.title()}' but email is from '{domain}'")
         else:
-            flags.append(f"Verified {claimed_brand.title()} official domain")
+            flags.append(f"Verified {claimed_brand.title()} official infrastructure")
     elif is_freemail and any(w in name_clean for w in ENTERPRISE_KEYWORDS):
         is_spoofed = True
         score += 30
         traps.append(f"Enterprise entity using public freemail ({domain})")
-        flags.append(f"Official-sounding name but using personal freemail domain ({domain})")
+        flags.append(f"Official-sounding name but uses personal email provider ({domain})")
 
-    # ── Numeric subdomain (e.g. 11654627.brevosend.com) ───────────────────────
-    if _has_numeric_subdomain(domain):
-        score += 18
-        traps.append(f"Numeric subdomain ({domain.split('.')[0]}) — bulk-mailer pattern")
-        flags.append(f"Numeric subdomain detected — typical of throwaway bulk-mail accounts")
+    # ── Only apply domain-level penalties if NOT a trusted sender ─────────────
+    if not trusted and not claimed_brand:
+        if _has_numeric_subdomain(domain):
+            score += 18
+            traps.append(f"Numeric subdomain ({domain.split('.')[0]}) — bulk-mailer abuse pattern")
+            flags.append(f"Numeric subdomain in sender — typical of throwaway bulk-mail accounts")
 
-    # ── Throwaway/random subdomain ────────────────────────────────────────────
-    if _domain_looks_throwaway(domain):
-        score += 14
-        traps.append("Randomised subdomain — throwaway sender address")
+        if _domain_looks_throwaway(domain) and not is_bulk:
+            score += 12
+            traps.append("Randomised subdomain — throwaway sender address")
 
-    # ── Suspicious TLD ────────────────────────────────────────────────────────
-    if tld in SUSPICIOUS_TLDS:
-        score += 20
-        traps.append(f"High-risk TLD '{tld}' — phishing registrations overwhelmingly use these")
-        flags.append(f"Domain uses high-risk TLD '{tld}'")
+        if tld in SUSPICIOUS_TLDS:
+            score += 20
+            traps.append(f"High-risk TLD '{tld}' — heavily used in phishing campaigns")
+            flags.append(f"Domain TLD '{tld}' is associated with phishing registrations")
 
-    # ── Bulk mailer without brand claim (lower weight — could be legit marketing) ──
-    if is_bulk and not claimed_brand:
-        score += 10
-        flags.append(f"Sent via bulk-mailer platform ({domain})")
+        if is_bulk:
+            # Bulk mailer from untrusted, unbranded sender — mild flag
+            score += 8
+            flags.append(f"Sent via bulk-mail platform ({domain}) without a verified brand identity")
 
-    # ── via_domain mismatch: Gmail shows "via thirdparty.com" ────────────────
+    # ── via_domain check — only flag if trusted sender not involved ───────────
     via = (via_domain or "").lower().strip()
-    if via and via != domain and not any(via == d or via.endswith("." + d) for d in BULK_MAILER_DOMAINS):
-        score += 15
-        traps.append(f"Relay mismatch — sent 'via {via}' but from-domain is '{domain}'")
-        flags.append(f"Email relayed via '{via}' which doesn't match the declared sender domain")
+    if via and not trusted and claimed_brand:
+        # Already handled in brand spoofing above
+        pass
+    elif via and not trusted and not is_bulk:
+        via_base = _base_domain(via)
+        if via_base != base and not _is_trusted(via):
+            score += 12
+            traps.append(f"Email relayed via unrecognised domain '{via}'")
+            flags.append(f"Sent 'via {via}' — relay domain not matching sender or trusted infrastructure")
 
-    # ── Reply-To different from sender ────────────────────────────────────────
+    # ── Reply-To hijack ────────────────────────────────────────────────────────
     rt = (reply_to or "").strip().lower()
     rt_domain = _extract_domain(rt) if rt and "@" in rt else ""
-    if rt_domain and rt_domain != domain:
+    rt_base = _base_domain(rt_domain) if rt_domain else ""
+    if rt_base and rt_base != base and not _is_trusted(rt_domain):
         score += 20
-        traps.append(f"Reply-To hijack — replies go to '{rt_domain}', not '{domain}'")
-        flags.append(f"Reply-To '{rt_domain}' differs from sender '{domain}' — classic phishing trick")
+        traps.append(f"Reply-To hijack — replies redirected to '{rt_domain}' (not '{domain}')")
+        flags.append(f"Reply-To '{rt_domain}' differs from sender — classic phishing interception trick")
 
-    # ── Display name contains a domain-like word different from actual domain ──
-    name_domains = re.findall(r'\b([a-z0-9\-]+\.(com|in|net|org|co\.in))\b', name_clean)
-    for nd, _ in name_domains:
-        if nd not in domain and domain not in nd:
-            score += 12
-            traps.append(f"Display-name domain spoofing: name says '{nd}', actual is '{domain}'")
-            flags.append(f"Display name references '{nd}' but actual domain is '{domain}'")
-            break
+    # ── Display name domain spoofing ───────────────────────────────────────────
+    if not trusted:
+        name_domains = re.findall(r'\b([a-z0-9\-]+\.(com|in|net|org|co\.in))\b', name_clean)
+        for nd, _ in name_domains:
+            if nd not in domain and domain not in nd and not _is_trusted(nd):
+                score += 12
+                traps.append(f"Display-name domain mismatch — name says '{nd}', actual domain is '{domain}'")
+                flags.append(f"Display name references '{nd}' but actual sending domain is '{domain}'")
+                break
 
-    # ── Missing / malformed sender email ──────────────────────────────────────
+    # ── Missing/malformed sender ───────────────────────────────────────────────
     if not sender_email or "@" not in sender_email:
         score += 20
         traps.append("Sender email missing or malformed")
-        flags.append("No valid sender email could be extracted")
+        flags.append("No valid sender email extracted")
 
-    details = "; ".join(flags) if flags else "Sender domain appears standard — no known spoofing patterns."
+    # ── Trust bonus — well-known legitimate sender ─────────────────────────────
+    if trusted and not is_spoofed:
+        score = max(score - 25, 0)
+        flags.append(f"Sender domain '{domain}' is a recognised legitimate service")
+
+    details = "; ".join(flags) if flags else f"Sender '{domain}' — no known spoofing patterns detected."
 
     return (
         SenderAudit(
@@ -307,88 +421,78 @@ def _audit_sender(
 
 def _score_subject(subject: str) -> tuple[list[str], int]:
     s = (subject or "").lower()
-    traps: list[str] = []
-    score = 0
-    if re.search(r"\b(urgent|important|action required|immediate|verify now|don.?t ignore|warning|alert)\b", s):
-        traps.append("Urgency/fear keyword in subject")
+    traps, score = [], 0
+    if re.search(r"\b(urgent|action required|immediate|verify now|warning)\b", s) and \
+       not re.search(r"\b(interview|internship|job|offer|campus)\b", s):
+        traps.append("Urgency keyword in subject")
         score += 8
-    if re.search(r"\b(won|winner|prize|lottery|free|gift|congratulations|selected|lucky draw)\b", s):
+    if re.search(r"\b(won|winner|lottery|lucky draw|prize|kbc)\b", s):
         traps.append("Prize/reward lure in subject")
         score += 10
-    if re.search(r"\b(invoice|receipt|order|delivery|shipment|tracking)\b", s) and re.search(r"#[0-9a-zA-Z]{4,}", s):
-        traps.append("Fake order/invoice number in subject")
+    if re.search(r"\b(invoice|receipt)\b.+#[0-9a-zA-Z]{4,}", s):
+        traps.append("Fake invoice number in subject")
         score += 8
-    if re.search(r"\b(password|otp|pin|security.?code)\b.*\b(expired|reset|changed|update|required)\b", s):
+    if re.search(r"\b(password|otp|pin|security.?code)\b.+\b(expired|reset|required)\b", s):
         traps.append("OTP/password reset lure in subject")
         score += 12
-    if re.search(r"\b(account (suspended|blocked|deactivated|terminated|on hold))\b", s):
+    if re.search(r"\b(account (suspended|blocked|deactivated|terminated))\b", s):
         traps.append("Account suspension bait in subject")
         score += 12
-    if re.search(r"\b(re:|fwd:|fw:)\b.+\[.+\]", s):
-        traps.append("Thread-spoofing header pattern in subject")
-        score += 6
+    # "Congratulations" + job/internship → NOT a scam
+    if re.search(r"\bcongratulations\b", s) and not re.search(r"\b(internship|job|offer|campus|select|hired)\b", s):
+        traps.append("Congratulations lure (without job context)")
+        score += 8
     return traps, score
 
 
-def _score_body(body: str) -> tuple[list[str], int]:
+def _score_body(body: str, combined_text: str) -> tuple[list[str], int]:
     text = (body or "").lower()
-    traps: list[str] = []
-    total = 0
-    seen: set[str] = set()
+    traps, total, seen = [], 0, set()
     for pattern, label, weight in URGENCY_PATTERNS:
         if re.search(pattern, text, re.IGNORECASE) and label not in seen:
             traps.append(label)
             total += weight
             seen.add(label)
-    return traps, min(total, 45)  # body contribution capped at 45
+    # Apply safe-context cancellation immediately
+    traps = _apply_safe_context(traps, combined_text)
+    # Recalculate total after cancellation
+    total = sum(w for _, l, w in URGENCY_PATTERNS if l in traps)
+    return traps, min(total, 40)
 
 
-def _build_verdict(
+def _build_advice(
     threat_score: int,
     sender_audit: SenderAudit,
     all_traps: list[str],
-    analyzed_links: list[ExtractedLinkResult],
-    is_spam_folder: bool,
+    is_spam: bool,
     gmail_flagged: bool,
-    has_dangerous_attachment: bool,
+    has_attach: bool,
 ) -> tuple[str, str, str, str]:
-    """Returns (risk_label, banner_color, safety_summary, ai_advice)."""
+    force_danger = gmail_flagged or has_attach or \
+        (sender_audit.is_spoofed and any(
+            t for t in all_traps if "otp" in t.lower() or "hijack" in t.lower() or "impersonation" in t.lower()
+        ))
 
-    force_dangerous = (
-        gmail_flagged
-        or has_dangerous_attachment
-        or (sender_audit.is_spoofed and len(all_traps) >= 2)
-    )
+    if threat_score >= 60 or force_danger:
+        label, color, summary = "dangerous", "rose", "⛔ High-Risk Phishing Email Detected"
+        brand = f" Impersonates **{sender_audit.claimed_brand}**." if sender_audit.claimed_brand else ""
+        gf = " Gmail itself flagged this as phishing." if gmail_flagged else ""
+        at = " Dangerous attachment detected." if has_attach else ""
+        tp = f" Signals: {', '.join(all_traps[:3])}." if all_traps else ""
+        advice = f"⛔ DO NOT click links, reply, or open attachments.{brand}{gf}{at}{tp} If you already interacted, change passwords immediately and report at cybercrime.gov.in (1930)."
 
-    if threat_score >= 60 or force_dangerous:
-        label, color = "dangerous", "rose"
-        summary = "⛔ High-Risk Phishing Email Detected"
-        brand_note = f" It impersonates **{sender_audit.claimed_brand}**." if sender_audit.claimed_brand else ""
-        gmail_note = " Gmail itself has flagged this as phishing." if gmail_flagged else ""
-        attach_note = " A dangerous attachment was detected." if has_dangerous_attachment else ""
-        trap_note = (f" Key signals: {', '.join(all_traps[:3])}." if all_traps else "")
-        advice = (
-            f"⛔ DO NOT click links, reply, or download attachments.{brand_note}{gmail_note}{attach_note}{trap_note} "
-            f"If you already interacted, change passwords immediately and report at cybercrime.gov.in or call 1930."
-        )
-
-    elif threat_score >= 30 or is_spam_folder or sender_audit.is_spoofed:
-        label, color = "suspicious", "amber"
-        summary = "⚠️ Suspicious Email — Verify Before Acting"
-        spam_note = " This email is in your spam folder." if is_spam_folder else ""
-        spoof_note = f" The sender domain '{sender_audit.actual_domain}' may not be genuine." if sender_audit.is_spoofed else ""
-        trap_note = (f" Suspicious patterns: {', '.join(all_traps[:2])}." if all_traps else "")
-        advice = (
-            f"⚠️ Exercise caution.{spam_note}{spoof_note}{trap_note} "
-            f"Do not share personal information or OTPs. Verify directly with the company if needed."
-        )
+    elif threat_score >= 28 or is_spam or sender_audit.is_spoofed:
+        label, color, summary = "suspicious", "amber", "⚠️ Suspicious — Verify Before Acting"
+        sp = " This email is in your spam folder." if is_spam else ""
+        sf = f" Sender domain '{sender_audit.actual_domain}' may not be genuine." if sender_audit.is_spoofed else ""
+        tp = f" Patterns: {', '.join(all_traps[:2])}." if all_traps else ""
+        advice = f"⚠️ Be cautious.{sp}{sf}{tp} Do not share OTPs, passwords, or personal information. Verify directly with the organisation."
 
     else:
-        label, color = "safe", "emerald"
-        summary = "✅ Appears Legitimate"
+        label, color, summary = "safe", "emerald", "✅ Appears Legitimate"
         advice = (
-            f"✅ No major phishing signals detected. Sender domain '{sender_audit.actual_domain}' "
-            f"shows no known spoofing patterns. Standard caution: never share OTPs or passwords over email."
+            f"✅ No phishing signals detected. Sender domain '{sender_audit.actual_domain}' "
+            f"matches expected patterns. Standard caution: never share OTPs or passwords over email."
         )
 
     return label, color, summary, advice
@@ -399,7 +503,13 @@ def _build_verdict(
 @router.post("/email", response_model=EmailAnalysisResponse)
 async def analyze_email_phishing(payload: EmailAnalysisRequest) -> EmailAnalysisResponse:
 
-    # ── 1. Sender audit + domain signals ──────────────────────────────────────
+    combined_text = " ".join([
+        payload.sender_name or "",
+        payload.subject or "",
+        payload.body_snippet or "",
+    ]).lower()
+
+    # 1. Sender
     sender_audit, sender_score, sender_traps = _audit_sender(
         payload.sender_name or "",
         payload.sender_email or "",
@@ -408,72 +518,56 @@ async def analyze_email_phishing(payload: EmailAnalysisRequest) -> EmailAnalysis
         payload.reply_to or "",
     )
 
-    # ── 2. Subject scoring ────────────────────────────────────────────────────
+    # 2. Subject
     subject_traps, subject_score = _score_subject(payload.subject or "")
 
-    # ── 3. Body linguistic scoring ────────────────────────────────────────────
-    body_traps, body_score = _score_body(payload.body_snippet or "")
+    # 3. Body (safe-context cancellation applied inside)
+    body_traps, body_score = _score_body(payload.body_snippet or "", combined_text)
 
-    # ── 4. Gmail-native context signals ───────────────────────────────────────
-    context_score = 0
-    context_traps: list[str] = []
-
+    # 4. Gmail context
+    context_score, context_traps = 0, []
     if payload.is_spam_folder:
-        context_score += 25          # Gmail's own spam filter already flagged it
+        context_score += 25
         context_traps.append("Gmail placed this email in the Spam folder")
-
     if payload.gmail_flagged_phishing:
-        context_score += 40          # Gmail explicitly showed a phishing warning
-        context_traps.append("Gmail's phishing detector flagged this email as phishing")
-
+        context_score += 40
+        context_traps.append("Gmail's own phishing detector flagged this email")
     if payload.has_dangerous_attachment:
         context_score += 30
-        context_traps.append("Dangerous file attachment detected (.exe / .apk / .scr / .zip etc.)")
+        context_traps.append("Dangerous file attachment (.exe/.apk/.scr/.zip etc.)")
 
-    # ── 5. Embedded link analysis ─────────────────────────────────────────────
+    # 5. Links
     all_links: set[str] = set(payload.links)
-    text_links = re.findall(r"https?://[^\s<>\"']+", payload.body_snippet or "")
-    all_links.update(text_links)
+    all_links.update(re.findall(r"https?://[^\s<>\"']+", payload.body_snippet or ""))
 
     analyzed_links: list[ExtractedLinkResult] = []
-    max_link_score = 0
-    has_dangerous_link = False
+    max_link_score, has_dangerous_link = 0, False
 
     for link in list(all_links)[:6]:
         try:
-            req = AnalysisRequest(url=link)
-            res = await analyze_url(req)
-            if res.risk_score > max_link_score:
-                max_link_score = res.risk_score
+            res = await analyze_url(AnalysisRequest(url=link))
+            max_link_score = max(max_link_score, res.risk_score)
             if res.label == "dangerous":
                 has_dangerous_link = True
             analyzed_links.append(ExtractedLinkResult(
-                url=link,
-                risk_score=res.risk_score,
-                label=res.label,
-                reasons=res.reasons[:3],
+                url=link, risk_score=res.risk_score, label=res.label, reasons=res.reasons[:3],
             ))
         except Exception:
             pass
 
-    link_score = 0
-    link_traps: list[str] = []
+    link_score, link_traps = 0, []
     if has_dangerous_link:
-        link_score = 40
-        link_traps.append(f"Dangerous embedded link detected (max link score: {max_link_score}/100)")
+        link_score, link_traps = 40, [f"Dangerous embedded link (score {max_link_score}/100)"]
     elif max_link_score >= 60:
-        link_score = 28
-        link_traps.append(f"High-risk embedded link (score: {max_link_score}/100)")
+        link_score, link_traps = 25, [f"High-risk link detected (score {max_link_score}/100)"]
     elif max_link_score >= 40:
-        link_score = 16
-        link_traps.append(f"Suspicious embedded link (score: {max_link_score}/100)")
+        link_score, link_traps = 14, [f"Suspicious link detected (score {max_link_score}/100)"]
     elif max_link_score >= 20:
-        link_score = 8
+        link_score = 6
 
-    # ── 6. Combine all signals ────────────────────────────────────────────────
-    all_traps: list[str] = list(dict.fromkeys(
-        sender_traps + subject_traps + body_traps + context_traps + link_traps
-    ))
+    # 6. Combine + apply final context cancellation
+    raw_traps = list(dict.fromkeys(sender_traps + subject_traps + body_traps + context_traps + link_traps))
+    all_traps = _apply_safe_context(raw_traps, combined_text)
 
     threat_score = min(max(sender_score + subject_score + body_score + context_score + link_score, 0), 100)
 
@@ -486,24 +580,19 @@ async def analyze_email_phishing(payload: EmailAnalysisRequest) -> EmailAnalysis
         "total": threat_score,
     }
 
-    # ── 7. Verdict ────────────────────────────────────────────────────────────
-    risk_label, banner_color, safety_summary, ai_advice = _build_verdict(
-        threat_score,
-        sender_audit,
-        all_traps,
-        analyzed_links,
-        payload.is_spam_folder,
-        payload.gmail_flagged_phishing,
-        payload.has_dangerous_attachment,
+    # 7. Verdict
+    risk_label, banner_color, safety_summary, ai_advice = _build_advice(
+        threat_score, sender_audit, all_traps,
+        payload.is_spam_folder, payload.gmail_flagged_phishing, payload.has_dangerous_attachment,
     )
 
-    # Confidence is higher when we have more data sources
-    data_richness = (
-        (0.1 if payload.body_snippet and len(payload.body_snippet) > 200 else 0.0) +
-        (0.05 if len(analyzed_links) > 0 else 0.0) +
-        (0.05 if payload.is_spam_folder or payload.gmail_flagged_phishing else 0.0)
-    )
-    confidence = round(min(0.75 + data_richness, 0.98), 2)
+    confidence = round(min(
+        0.75
+        + (0.08 if payload.body_snippet and len(payload.body_snippet) > 200 else 0.0)
+        + (0.05 if analyzed_links else 0.0)
+        + (0.05 if payload.is_spam_folder or payload.gmail_flagged_phishing else 0.0),
+        0.98,
+    ), 2)
 
     return EmailAnalysisResponse(
         threat_score=threat_score,
