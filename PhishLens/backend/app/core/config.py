@@ -7,8 +7,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """Runtime settings loaded from environment variables."""
 
-    app_name: str = "PhishLens API"
-    service_name: str = "phishlens-api"
+    app_name: str = "KavachX API"
+    service_name: str = "kavachx-api"
     phishtank_api_key: str | None = Field(default=None, validation_alias="PHISHTANK_API_KEY")
     phishtank_user_agent: str = Field(
         default="phishtank/phishlens-demo",

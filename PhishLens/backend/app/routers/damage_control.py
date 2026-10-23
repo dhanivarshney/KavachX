@@ -79,5 +79,5 @@ async def download_incident_dossier(incident_id: str):
     return Response(
         content=dossier,
         media_type="text/plain",
-        headers={"Content-Disposition": f'attachment; filename="PhishLens_Incident_{incident_id}.txt"'},
+        headers={"Content-Disposition": f'attachment; filename="KavachX_Incident_{incident_id}.txt"'},
     )

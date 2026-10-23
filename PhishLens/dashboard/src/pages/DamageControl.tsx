@@ -817,7 +817,7 @@ export default function DamageControl() {
               </div>
               <div className="flex-1 min-w-0">
                 <span className="text-[10px] font-mono uppercase tracking-wider text-blue-700 font-bold block mb-0.5">
-                  PhishLens Threat Telemetry Linked
+                  KavachX Threat Telemetry Linked
                 </span>
                 <span className="text-xs font-mono font-bold text-slate-900 truncate block">
                   {incident.details.correlated_scan.url}
@@ -952,7 +952,7 @@ export default function DamageControl() {
                   <span>FIR / Cybercrime Dossier</span>
                 </div>
                 <p className="text-[11px] text-slate-500 leading-relaxed">
-                  PhishLens has assembled a formal incident docket formatted with your statement,
+                  KavachX has assembled a formal incident docket formatted with your statement,
                   UTR references, and scammer handles. You can submit this directly at your local police station or online.
                 </p>
                 <div className="pt-2">

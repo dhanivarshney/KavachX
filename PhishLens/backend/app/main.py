@@ -28,7 +28,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(
     title=settings.app_name,
     version="0.4.0",
-    description="Defensive phishing risk analysis API for the PhishLens browser extension.",
+    description="Defensive threat intelligence & anti-phishing risk analysis API for KavachX.",
     lifespan=lifespan,
 )
 
