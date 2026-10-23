@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { NavLink } from "react-router-dom";
-import { ShieldCheck, Globe, MessageSquare, FileText, BarChart3, Menu, X, Activity, ShieldAlert } from "lucide-react";
+import { Globe, MessageSquare, FileText, BarChart3, Menu, X, Activity, ShieldAlert } from "lucide-react";
 import { BRANDING } from "../config/branding";
 import { getHealth } from "../api/phishlens";
 
@@ -59,13 +59,13 @@ export default function Navbar() {
       <div className="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
         {/* Brand */}
         <NavLink to="/" className="flex items-center gap-3 group focus:outline-none">
-          <div className="p-2 rounded-xl bg-blue-600 text-white shadow-sm group-hover:bg-blue-700 transition-colors">
-            <ShieldCheck size={20} className="stroke-[2.2]" />
+          <div className="p-1 rounded-xl bg-slate-900 shadow-sm group-hover:scale-105 transition-transform">
+            <img src="/kavachx-logo.png" alt="KavachX" className="w-8 h-8 object-contain" />
           </div>
           <div className="flex flex-col">
             <div className="flex items-center gap-2">
-              <span className="font-semibold text-slate-900 text-sm tracking-tight">
-                {BRANDING.productName}
+              <span className="font-bold text-slate-900 text-sm tracking-tight">
+                Kavach<span className="text-emerald-600">X</span>
               </span>
               <span className="text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-100/80">
                 {BRANDING.version.split(" ")[0]}

@@ -6,12 +6,16 @@ import Smishing from "./pages/Smishing";
 import TrustReport from "./pages/TrustpilotHub";
 import Stats from "./pages/Stats";
 import DamageControl from "./pages/DamageControl";
+import HeroSplashScreen from "./components/HeroSplashScreen";
 import { ToastProvider } from "./components/Toast";
 
 export default function App() {
   return (
     <BrowserRouter>
       <ToastProvider>
+        {/* 3-Second High-Impact Hero / Splash Screen */}
+        <HeroSplashScreen durationSeconds={3} />
+
         <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900 selection:bg-blue-600 selection:text-white antialiased font-sans">
           <Navbar />
           <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 md:py-10">
