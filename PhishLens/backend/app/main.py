@@ -1,0 +1,62 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.core.config import get_settings
+from app.core.logging_config import configure_logging
+from app.exception_handlers import validation_exception_handler
+from app.middleware.request_context import RequestContextMiddleware
+from app.routers import analyze, diagnostics, explain, health, report, scans, stats, reputation, smishing
+from app.services.ml_service import warm_up_model
+
+configure_logging()
+
+settings = get_settings()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    # Loading the model artifact triggers a one-time, multi-second sklearn import
+    # cost. Doing it here keeps that cost out of the first real /analyze request.
+    warm_up_model(settings)
+    yield
+
+
+app = FastAPI(
+    title=settings.app_name,
+    version="0.4.0",
+    description="Defensive phishing risk analysis API for the PhishLens browser extension.",
+    lifespan=lifespan,
+)
+
+_extension_origins = settings.chrome_extension_origins
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[*settings.allowed_origins, *_extension_origins],
+    # Fall back to broad regex only when no specific IDs are configured (local dev).
+    allow_origin_regex=(
+        r"^chrome-extension://.*$"
+        if settings.allow_chrome_extension_origins and not _extension_origins
+        else None
+    ),
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "X-Request-ID", "X-Diagnostics-Token"],
+    expose_headers=["X-Request-ID"],
+)
+app.add_middleware(RequestContextMiddleware)
+
+app.add_exception_handler(RequestValidationError, validation_exception_handler)  # type: ignore[arg-type]
+
+app.include_router(health.router)
+app.include_router(analyze.router)
+app.include_router(report.router)
+app.include_router(diagnostics.router)
+app.include_router(explain.router)
+app.include_router(stats.router)
+app.include_router(scans.router)
+app.include_router(reputation.router)
+app.include_router(smishing.router)

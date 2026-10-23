@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PhishLens Demo - Suspicious Page</title>
+    <style>
+      body {
+        max-width: 760px;
+        margin: 48px auto;
+        padding: 0 20px;
+        color: #172033;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        line-height: 1.5;
+      }
+      form,
+      section {
+        margin-top: 20px;
+        padding: 16px;
+        border: 1px solid #d7dde8;
+        border-radius: 8px;
+      }
+      label {
+        display: grid;
+        gap: 6px;
+        margin-bottom: 12px;
+      }
+      input {
+        min-height: 36px;
+      }
+      iframe {
+        width: 100%;
+        height: 60px;
+        border: 1px solid #d7dde8;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Suspicious Demo Page</h1>
+      <!--
+        Tuned to land in the "suspicious" band (35-69) in both local-only and
+        backend-enriched mode: plain http (URL 5) plus a form, a password field,
+        an external form action, one iframe, and a hidden input next to the
+        password (DOM 26). 31 of 65 heuristic points scale to 48, and the ML
+        adjustment (-5 to +12) keeps it between 43 and 60. No brand name, no
+        external links, and no suspicious keyword in the URL, so nothing pushes it
+        to "dangerous". extension/e2e/smoke.mjs asserts the resulting label.
+      -->
+      <p>
+        This sign-in form posts to a different domain than the page it is on, which is one of the signals PhishLens
+        treats as suspicious. It is a local demo fixture: the form never submits. Do not enter real information.
+      </p>
+      <form action="https://example.net/demo-sign-in" method="post">
+        <input type="hidden" name="session_marker" value="demo-only" />
+        <label>
+          Account ID
+          <input name="account" autocomplete="off" />
+        </label>
+        <label>
+          Password
+          <input type="password" name="password" autocomplete="off" />
+        </label>
+        <button type="button">Continue</button>
+      </form>
+      <section>
+        <a href="/pages/safe.html">Internal safety page</a>
+      </section>
+      <iframe title="demo frame" src="/pages/safe.html"></iframe>
+    </main>
+  </body>
+</html>

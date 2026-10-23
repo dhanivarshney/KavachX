@@ -1,0 +1,46 @@
+name: Extension CI
+
+on:
+  push:
+    paths:
+      - "extension/**"
+      - ".github/workflows/extension-ci.yml"
+  pull_request:
+    branches:
+      - develop
+      - main
+
+jobs:
+  extension:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extension
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: extension/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Type check
+        run: npm run lint
+      - name: Unit tests
+        run: npm run test:coverage
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: extension/coverage/lcov.info
+          flags: extension
+          fail_ci_if_error: false
+      - name: Build
+        run: npm run build
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+      - name: E2E smoke test (real Chromium)
+        run: npm run test:e2e
+      - name: Package
+        run: npm run package

@@ -1,0 +1,184 @@
+import { describe, expect, it } from "vitest";
+
+import { KNOWN_BRAND_DOMAINS, extractUrlFeatures } from "./url-features";
+
+describe("KNOWN_BRAND_DOMAINS", () => {
+  it("loads the seed brand list from data/brand-domains.json", () => {
+    expect(KNOWN_BRAND_DOMAINS).toContain("paypal.com");
+    expect(KNOWN_BRAND_DOMAINS).toContain("google.com");
+    expect(KNOWN_BRAND_DOMAINS.length).toBe(26);
+  });
+});
+
+describe("extractUrlFeatures", () => {
+  it("detects suspicious URL features", () => {
+    const features = extractUrlFeatures("http://secure-login.example.test/account-update");
+
+    expect(features.uses_https).toBe(false);
+    expect(features.suspicious_keywords).toEqual(expect.arrayContaining(["secure", "login", "account", "update"]));
+    expect(features.num_hyphens).toBeGreaterThan(0);
+  });
+
+  it("detects IP domains and @ symbols", () => {
+    const features = extractUrlFeatures("https://user@example.com@192.168.0.1/login");
+
+    expect(features.uses_ip_domain).toBe(true);
+    expect(features.has_at_symbol).toBe(true);
+  });
+
+  it("detects typosquatting via Levenshtein distance", () => {
+    const features = extractUrlFeatures("https://paypa1.com/login");
+
+    expect(features.typosquat_target).toBe("paypal.com");
+    expect(features.typosquat_distance).toBe(1);
+  });
+
+  it("detects typosquatting across TLDs", () => {
+    const features = extractUrlFeatures("https://paypa1.net/login");
+
+    expect(features.typosquat_target).toBe("paypal.com");
+    expect(features.typosquat_distance).toBe(1);
+  });
+
+  it("detects combosquatting", () => {
+    const features = extractUrlFeatures("https://paypal-secure-login.com/account");
+
+    expect(features.typosquat_target).toBe("paypal.com");
+    expect(features.typosquat_distance).toBe(1);
+  });
+
+  it("detects combosquatting on two-label public suffixes", () => {
+    const features = extractUrlFeatures("https://paypal-secure.co.uk/account");
+
+    expect(features.typosquat_target).toBe("paypal.com");
+    expect(features.typosquat_distance).toBe(1);
+    expect(features.num_subdomains).toBe(0);
+  });
+
+  // Mirrors test_extract_url_features_does_not_count_leading_www in the backend.
+  it.each<[string, number, number]>([
+    ["https://www.paypal.com/signin", 0, 1],
+    ["https://paypal.com/signin", 0, 1],
+    ["https://www.accounts.example.com/", 1, 2],
+    ["https://mail.www.example.com/", 2, 3],
+    ["https://www.com/", 0, 1],
+  ])("does not count a leading www as a subdomain or dot: %s", (url, numSubdomains, numDots) => {
+    const features = extractUrlFeatures(url);
+
+    expect(features.num_subdomains).toBe(numSubdomains);
+    expect(features.num_dots).toBe(numDots);
+  });
+
+  it("does not flag the real brand domain", () => {
+    const features = extractUrlFeatures("https://paypal.com/login");
+
+    expect(features.typosquat_target).toBeNull();
+    expect(features.typosquat_distance).toBeNull();
+  });
+
+  it("does not flag an exact brand label on an alternate suffix", () => {
+    const features = extractUrlFeatures("https://accounts.google.co.uk/login");
+
+    expect(features.typosquat_target).toBeNull();
+    expect(features.typosquat_distance).toBeNull();
+    expect(features.num_subdomains).toBe(1);
+  });
+
+  it.each([
+    "https://raw.githubusercontent.com/JuanCardesa/PhishLens/main/README.md",
+    "https://storage.googleapis.com/example-bucket/file.txt",
+    "https://appleton.com/",
+  ])("does not flag brand substrings without separators: %s", (url) => {
+    const features = extractUrlFeatures(url);
+
+    expect(features.typosquat_target).toBeNull();
+    expect(features.typosquat_distance).toBeNull();
+  });
+
+  it("does not flag unrelated domains", () => {
+    const features = extractUrlFeatures("https://example.com");
+
+    expect(features.typosquat_target).toBeNull();
+    expect(features.typosquat_distance).toBeNull();
+  });
+
+  it.each([
+    ["https://xn--bcher-kva.de/", 0],
+    ["https://xn--e1afmkfd.xn--p1ai/", 0],
+    ["https://xn--tst-bc-6nf0b.com/", 1],
+  ])("counts only visible IDN hyphens: %s", (url, expectedHyphens) => {
+    const features = extractUrlFeatures(url);
+
+    expect(features.uses_punycode).toBe(true);
+    expect(features.num_hyphens).toBe(expectedHyphens);
+    expect(features.typosquat_target).toBeNull();
+    expect(features.typosquat_distance).toBeNull();
+  });
+
+  it("skips the typosquat check for IP domains", () => {
+    const features = extractUrlFeatures("http://192.168.0.1/login");
+
+    expect(features.typosquat_target).toBeNull();
+    expect(features.typosquat_distance).toBeNull();
+    expect(features.mixed_script_label).toBe(false);
+  });
+
+  it("detects a full-script homograph", () => {
+    // xn--80ak6aa92e decodes to "аррӏе" (all Cyrillic look-alikes of "apple")
+    const features = extractUrlFeatures("https://xn--80ak6aa92e.com/login");
+
+    expect(features.typosquat_target).toBe("apple.com");
+    expect(features.typosquat_distance).toBe(0);
+    expect(features.typosquat_is_homograph).toBe(true);
+    // A single, consistently Cyrillic label is not "mixed" script.
+    expect(features.mixed_script_label).toBe(false);
+  });
+
+  it("detects a mixed-script homograph", () => {
+    // "gооgle.com": the two "o"s are Cyrillic look-alikes (U+043E).
+    const features = extractUrlFeatures("https://gооgle.com/login");
+
+    expect(features.typosquat_target).toBe("google.com");
+    expect(features.typosquat_distance).toBe(0);
+    expect(features.typosquat_is_homograph).toBe(true);
+    expect(features.mixed_script_label).toBe(true);
+  });
+
+  it("flags mixed-script labels even without a brand match", () => {
+    // "tеst-аbc.com": Cyrillic "е" and "а" mixed into an otherwise
+    // Latin label that does not resemble any known brand.
+    const features = extractUrlFeatures("https://tеst-аbc.com/");
+
+    expect(features.mixed_script_label).toBe(true);
+    expect(features.typosquat_target).toBeNull();
+    expect(features.typosquat_distance).toBeNull();
+    expect(features.typosquat_is_homograph).toBe(false);
+  });
+
+  it("does not flag an ASCII typosquat as a homograph", () => {
+    const features = extractUrlFeatures("https://paypa1.com/login");
+
+    expect(features.typosquat_is_homograph).toBe(false);
+    expect(features.mixed_script_label).toBe(false);
+  });
+
+  it("detects a brand's full domain hidden in the subdomains", () => {
+    const features = extractUrlFeatures("https://paypal.com.account-verify.example/login");
+
+    expect(features.brand_subdomain_target).toBe("paypal.com");
+    // The registrable domain is the attacker's, so typosquat sees nothing.
+    expect(features.typosquat_target).toBeNull();
+  });
+
+  it("does not flag a legitimate brand subdomain", () => {
+    const features = extractUrlFeatures("https://login.paypal.com/signin");
+
+    expect(features.brand_subdomain_target).toBeNull();
+  });
+
+  it("does not flag a bare brand label without the full brand domain", () => {
+    const features = extractUrlFeatures("https://paypal.internal.example/");
+
+    expect(features.brand_subdomain_target).toBeNull();
+  });
+});

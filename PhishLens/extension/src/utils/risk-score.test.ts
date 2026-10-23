@@ -1,0 +1,229 @@
+import { describe, expect, it } from "vitest";
+
+import type { DOMFeatures } from "../types/analysis";
+import { analyzeLocally } from "./risk-score";
+
+const EMPTY_DOM: DOMFeatures = {
+  has_password_field: false,
+  num_forms: 0,
+  external_form_action: false,
+  num_iframes: 0,
+  external_links_ratio: 0,
+  has_hidden_inputs: false,
+  brand_text_mismatch: false,
+  favicon_hotlinked_brand: false,
+};
+
+describe("analyzeLocally", () => {
+  it("returns safe for a low-risk page", () => {
+    const result = analyzeLocally("https://example.com", EMPTY_DOM);
+
+    expect(result.label).toBe("safe");
+    expect(result.risk_score).toBeLessThan(35);
+    expect(result.risk_breakdown?.map((item) => item.category)).toEqual([
+      "url",
+      "dom",
+      "threat_intel",
+      "tls",
+      "domain_age",
+      "ml",
+    ]);
+  });
+
+  it("combines URL and DOM signals into suspicious risk", () => {
+    const result = analyzeLocally("http://verify-account.example.test/login-update", {
+      has_password_field: true,
+      num_forms: 1,
+      external_form_action: true,
+      num_iframes: 1,
+      external_links_ratio: 0.2,
+      has_hidden_inputs: true,
+      brand_text_mismatch: false,
+      favicon_hotlinked_brand: false,
+    });
+
+    expect(result.label).toBe("suspicious");
+    expect(result.reasons).toContain("Form submits data to an external domain");
+    expect(result.risk_breakdown?.find((item) => item.category === "dom")?.max_score).toBe(30);
+    expect(result.risk_breakdown?.find((item) => item.category === "ml")?.min_score).toBe(-5);
+  });
+
+  it("caps url score at 35", () => {
+    const result = analyzeLocally(
+      "http://secure-login-verify-account-update-password-bank.attacker.phishing.scam.evil.bad.com/wallet",
+      EMPTY_DOM,
+    );
+    const urlScore = result.risk_breakdown?.find((item) => item.category === "url")?.score ?? 999;
+    expect(urlScore).toBeLessThanOrEqual(35);
+  });
+
+  it("reaches dangerous in local-only mode when most available signals fire", () => {
+    // Homograph domain (url score 24, capped contributors) plus a heavily flagged DOM
+    // (forms +2, password +8, external action +10, hidden-with-password +3, multiple
+    // iframes +6 = 29) gives raw 24 + 29 = 53, scaled to round(53 / 65 * 100) = 82 ->
+    // dangerous. Before normalizing the local score against the backend's thresholds,
+    // "dangerous" was effectively unreachable in local-only mode (it required ~92% of the raw max).
+    const result = analyzeLocally("https://xn--ggle-55da.com", {
+      has_password_field: true,
+      num_forms: 1,
+      external_form_action: true,
+      num_iframes: 3,
+      external_links_ratio: 0,
+      has_hidden_inputs: true,
+      brand_text_mismatch: false,
+      favicon_hotlinked_brand: false,
+    });
+
+    expect(result.label).toBe("dangerous");
+    expect(result.risk_score).toBeGreaterThanOrEqual(70);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Parity vectors - mirrors backend/tests/test_scoring_parity.py exactly.
+// If a value here diverges from the Python test, the offline fallback is wrong.
+// ---------------------------------------------------------------------------
+
+describe("scoring parity (mirrors backend/tests/test_scoring_parity.py)", () => {
+  it("benign https URL scores 0 URL points", () => {
+    const result = analyzeLocally("https://example.com", EMPTY_DOM);
+    const urlScore = result.risk_breakdown?.find((item) => item.category === "url")?.score;
+    expect(urlScore).toBe(0);
+  });
+
+  it("no-HTTPS adds 5 URL points", () => {
+    const result = analyzeLocally("http://example.com", EMPTY_DOM);
+    const urlScore = result.risk_breakdown?.find((item) => item.category === "url")?.score;
+    expect(urlScore).toBe(5);
+  });
+
+  it("two suspicious keywords + no HTTPS = 13 URL points", () => {
+    // http (+5) + keywords 'secure','login' -> min(8, 4*2=8)=8 -> total 13
+    const result = analyzeLocally("http://secure-login.example.com", EMPTY_DOM);
+    const urlScore = result.risk_breakdown?.find((item) => item.category === "url")?.score;
+    expect(urlScore).toBe(13);
+  });
+
+  it("empty DOM scores 0 DOM points", () => {
+    const result = analyzeLocally("https://example.com", EMPTY_DOM);
+    const domScore = result.risk_breakdown?.find((item) => item.category === "dom")?.score;
+    expect(domScore).toBe(0);
+  });
+
+  it("password field + form + external action = 20 DOM points", () => {
+    // forms (+2) + password (+8) + external action (+10) = 20
+    const result = analyzeLocally("https://example.com", {
+      ...EMPTY_DOM,
+      has_password_field: true,
+      num_forms: 1,
+      external_form_action: true,
+    });
+    const domScore = result.risk_breakdown?.find((item) => item.category === "dom")?.score;
+    expect(domScore).toBe(20);
+  });
+
+  it("url 13 + dom 26 = raw 39, scaled to 60/100 -> suspicious", () => {
+    const result = analyzeLocally("http://secure-login.example.com", {
+      ...EMPTY_DOM,
+      has_password_field: true,
+      external_form_action: true,
+      favicon_hotlinked_brand: true,
+    });
+    // Raw url(13) + dom(password 8 + external 10 + favicon 8 = 26) = 39 out of a local
+    // max of 65 (URL_SCORE_CAP + DOM_SCORE_CAP), scaled to the same 0-100 range the
+    // backend uses: round(39 / 65 * 100) = 60.
+    expect(result.risk_score).toBe(60);
+    expect(result.label).toBe("suspicious");
+  });
+
+  it("num_dots excludes query string", () => {
+    // Both URLs have the same hostname+path dots; query string should not count
+    const withQs = analyzeLocally("https://maps.example.com?q=1.5,2.3&zoom=1.0", EMPTY_DOM);
+    const withoutQs = analyzeLocally("https://maps.example.com", EMPTY_DOM);
+    const dotsWithQs = withQs.risk_breakdown?.find((i) => i.category === "url")?.score;
+    const dotsWithout = withoutQs.risk_breakdown?.find((i) => i.category === "url")?.score;
+    expect(dotsWithQs).toBe(dotsWithout);
+  });
+
+  it("typosquat domain adds 14 URL points", () => {
+    // https (+0) + typosquat (+14) = 14
+    const result = analyzeLocally("https://paypa1.com", EMPTY_DOM);
+    const urlScore = result.risk_breakdown?.find((item) => item.category === "url")?.score;
+    expect(urlScore).toBe(14);
+    expect(result.reasons).toContain("Domain closely resembles paypal.com (possible typosquatting)");
+  });
+
+  it("full-script homograph adds 16 URL points", () => {
+    // https (+0) + homograph (+16) = 16
+    // xn--80ak6aa92e decodes to a Cyrillic look-alike of "apple".
+    const result = analyzeLocally("https://xn--80ak6aa92e.com", EMPTY_DOM);
+    const urlScore = result.risk_breakdown?.find((item) => item.category === "url")?.score;
+    expect(urlScore).toBe(16);
+    expect(result.reasons).toContain(
+      "Domain uses look-alike Unicode characters resembling apple.com (homograph attack)",
+    );
+  });
+
+  it("mixed-script homograph adds homograph and mixed-script points", () => {
+    // homograph (+16) + mixed-script (+8) = 24.
+    // xn--ggle-55da is the real punycode form of g + two Cyrillic o's + gle.
+    const result = analyzeLocally("https://xn--ggle-55da.com", EMPTY_DOM);
+    const urlScore = result.risk_breakdown?.find((item) => item.category === "url")?.score;
+    expect(urlScore).toBe(24);
+    expect(result.reasons).toContain("Domain label mixes multiple writing scripts (possible homograph attack)");
+    expect(result.reasons).toContain(
+      "Domain uses look-alike Unicode characters resembling google.com (homograph attack)",
+    );
+  });
+
+  it("Unicode literal homograph matches punycode score", () => {
+    const unicodeResult = analyzeLocally("https://g\u043e\u043egle.com", EMPTY_DOM);
+    const punycodeResult = analyzeLocally("https://xn--ggle-55da.com", EMPTY_DOM);
+    const unicodeScore = unicodeResult.risk_breakdown?.find((item) => item.category === "url")?.score;
+    const punycodeScore = punycodeResult.risk_breakdown?.find((item) => item.category === "url")?.score;
+
+    expect(unicodeScore).toBe(punycodeScore);
+    expect(unicodeScore).toBe(24);
+    expect(unicodeResult.reasons).toEqual(punycodeResult.reasons);
+  });
+
+  it("benign IDN scores 0 URL points", () => {
+    const result = analyzeLocally("https://xn--bcher-kva.de", EMPTY_DOM);
+    const urlScore = result.risk_breakdown?.find((item) => item.category === "url")?.score;
+    expect(urlScore).toBe(0);
+    expect(result.reasons).toEqual(["No high-risk signals were detected"]);
+  });
+
+  it("brand text mismatch scores only in a credential context = 28 DOM points", () => {
+    // password (+8) + brand_text_mismatch (+12) + favicon_hotlinked_brand (+8) = 28
+    const result = analyzeLocally("https://example.com", {
+      ...EMPTY_DOM,
+      has_password_field: true,
+      brand_text_mismatch: true,
+      favicon_hotlinked_brand: true,
+    });
+    const domScore = result.risk_breakdown?.find((item) => item.category === "dom")?.score;
+    expect(domScore).toBe(28);
+    expect(result.reasons).toContain("Page text references a well-known brand that does not match this domain");
+    expect(result.reasons).toContain("Page favicon is hotlinked from a different brand's domain");
+  });
+
+  it("brand mention without a credential surface is not flagged (false-positive regression)", () => {
+    // A news article / review that merely names a brand on an unrelated domain,
+    // with a search form and CSRF hidden inputs but no password field, must stay
+    // safe and must NOT surface the brand-mismatch reason.
+    const result = analyzeLocally("https://news.example.com/story", {
+      ...EMPTY_DOM,
+      num_forms: 1,
+      num_iframes: 2,
+      external_links_ratio: 0.6,
+      has_hidden_inputs: true,
+      brand_text_mismatch: true,
+    });
+    expect(result.label).toBe("safe");
+    expect(result.reasons).not.toContain(
+      "Page text references a well-known brand that does not match this domain",
+    );
+    expect(result.reasons).not.toContain("Page contains hidden inputs alongside a password field");
+  });
+});

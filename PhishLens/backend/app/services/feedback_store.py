@@ -1,0 +1,113 @@
+from __future__ import annotations
+
+import sqlite3
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+
+
+@dataclass
+class FeedbackEntry:
+    url_host: str
+    observed_label: str
+    expected_label: str
+    notes_present: bool
+    request_id: str | None
+    created_at: str
+
+
+class SQLiteFeedbackStore:
+    """Thread-safe SQLite store for user feedback.
+
+    Stores only non-sensitive metadata: hostname (not full URL), labels, and
+    whether a note was present. Full URLs, page content, and notes text are
+    never persisted — consistent with docs/privacy.md.
+    """
+
+    def __init__(self, db_path: str) -> None:
+        self._db_path = db_path
+        self._lock = threading.Lock()
+        self._init_schema()
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        # `with sqlite3.connect(...)` only commits or rolls back; it never closes
+        # the connection, so every call used to leave one open until garbage
+        # collection. Close it explicitly once the transaction is done.
+        conn = sqlite3.connect(self._db_path)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
+    def _init_schema(self) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS feedback (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    url_host    TEXT    NOT NULL,
+                    observed    TEXT    NOT NULL,
+                    expected    TEXT    NOT NULL,
+                    note_present INTEGER NOT NULL DEFAULT 0,
+                    request_id  TEXT,
+                    created_at  TEXT    NOT NULL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_feedback_created ON feedback(created_at)")
+            # created_at is ISO 8601 with a "T" and a UTC offset; datetime() normalizes it
+            # before comparing. A plain string comparison against datetime('now', ...)
+            # kept rows from the cutoff day up to ~24h past the 30-day window.
+            conn.execute("DELETE FROM feedback WHERE datetime(created_at) < datetime('now', '-30 days')")
+
+    def record(self, entry: FeedbackEntry) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO feedback
+                    (url_host, observed, expected, note_present, request_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    entry.url_host,
+                    entry.observed_label,
+                    entry.expected_label,
+                    1 if entry.notes_present else 0,
+                    entry.request_id,
+                    entry.created_at,
+                ),
+            )
+
+    def count(self) -> int:
+        with self._lock, self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) FROM feedback").fetchone()
+            return int(row[0]) if row else 0
+
+
+class _DisabledFeedbackStore:
+    """No-op store used when PHISHLENS_FEEDBACK_DB_PATH is empty."""
+
+    def record(self, entry: FeedbackEntry) -> None:
+        pass
+
+    def count(self) -> int:
+        return 0
+
+
+def _make_store(db_path: str) -> SQLiteFeedbackStore | _DisabledFeedbackStore:
+    if not db_path.strip():
+        return _DisabledFeedbackStore()
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    return SQLiteFeedbackStore(db_path)
+
+
+# Module-level singleton; initialised once on first import.
+def _init_feedback_store() -> SQLiteFeedbackStore | _DisabledFeedbackStore:
+    from app.core.config import get_settings  # local import avoids circular deps
+    return _make_store(get_settings().feedback_db_path)
+
+
+FEEDBACK_STORE: SQLiteFeedbackStore | _DisabledFeedbackStore = _init_feedback_store()

@@ -1,0 +1,115 @@
+# Architecture
+
+PhishLens has three main runtime parts:
+
+```text
+Browser tab
+  -> content script
+  -> popup UI and options page
+  -> FastAPI backend
+  -> optional PhishTank, TLS socket inspection, RDAP domain age, and local ML model
+  -> development diagnostics and rate limiting
+```
+
+## Analysis Flow
+
+1. The user opens the extension popup.
+2. The popup reads the active tab URL through Chrome APIs.
+3. The content script returns only technical DOM features:
+   number of forms, password field presence, external form action, iframe count, external link ratio, hidden input presence,
+   a brand-text mismatch flag (visible title/meta/heading text names a known brand whose registrable domain differs from the
+   current page), and a favicon-hotlink flag (the favicon `<link>` points at a different origin that is itself a known brand
+   domain).
+4. The popup computes a local fallback score.
+5. The popup reads backend settings from `chrome.storage.sync`.
+6. The popup calls `POST /analyze` when the configured backend is available.
+7. The backend normalizes the URL, removes fragments, and combines URL heuristics, DOM signals, optional PhishTank, TLS checks, RDAP domain age, and optional ML adjustment.
+8. PhishTank, TLS, and RDAP domain age checks use short in-memory TTL caches to reduce repeated external calls (domain age is cached for 24h since registration dates do not change minute to minute).
+9. In development demo mode, localhost URLs containing `phishlens-demo-dangerous` can trigger an explicit demo threat signal.
+10. The backend returns both compatibility `reasons` and structured `risk_breakdown` items by category.
+11. The popup displays score, label, confidence, risk breakdown, source mode, and feedback controls.
+12. A `dangerous` final result can inject a dismissible page overlay when enabled.
+13. `/diagnostics` exposes aggregate counters only when diagnostics are enabled.
+14. The options page can query `/health` and `/diagnostics` to show backend status, capability flags, and aggregate counters without exposing URLs or page content.
+
+## Risk Breakdown
+
+`POST /analyze` returns the final normalized score and a structured category breakdown:
+
+| Category | Score Range | Purpose |
+| --- | --- | --- |
+| `url` | `0..35` | URL length, host shape, suspicious keywords, HTTPS, punycode, and entropy. |
+| `dom` | `0..30` | Non-sensitive page structure signals such as forms, password field presence, iframes, external form action, external link ratio, hidden input presence, visible-text brand mismatch, and favicon hotlinked from a known brand domain. |
+| `threat_intel` | `0..40` | Optional PhishTank or local demo threat source result. |
+| `tls` | `0..15` | Backend-side certificate validity, expiration, and controlled TLS errors. |
+| `domain_age` | `0..20` | Optional RDAP domain registration age. Domains registered in the last 30/180 days score higher; missing or privacy-protected registration data scores 0 (not treated as suspicious). |
+| `ml` | `-5..12` | Optional model adjustment: +12 for a phishing probability of at least 0.65, −5 for 0.35 or less, 0 otherwise (sized in `docs/ml-methodology.md`). Missing model artifacts use a neutral fallback. |
+
+The final `risk_score` is not the plain sum of these categories. `url` and `dom` are the only categories the extension can score offline, so their combined points are scaled onto 0-100 (`round((url + dom) / 65 × 100)`, `scale_heuristic_score` in `scoring_service.py`). That scaled value is exactly the extension's local score (`analyzeLocally` in `risk-score.ts`). The backend then adds `threat_intel`, `tls`, `domain_age`, and `ml` on top and clamps the result to 0-100. The backend score is therefore the local score plus enrichment: only a negative ML adjustment can lower it. `label` uses the same thresholds in both modes: `safe` below 35, `suspicious` from 35, `dangerous` from 70. `contracts/scoring-vectors.json` asserts the scaled score and label on both sides.
+
+The top-level `reasons` list remains for compatibility. New UI should prefer `risk_breakdown` because it includes category, score, cap, source, and reasons.
+
+## Extension And Backend Boundary
+
+The extension does not send full HTML or form values. The backend receives the URL and structured DOM features only.
+
+Feedback uses the same privacy boundary. The popup sends URL, observed label, expected label, and a short non-sensitive note. The backend logs host-level context and persists only host-level label metadata in the configured SQLite feedback store; it does not persist full URLs, note text, page content, form values, credentials, cookies, screenshots, or HTML.
+
+## Configuration Flow
+
+The options page stores:
+
+- Backend base URL.
+- Backend request timeout.
+- Whether the dangerous-result overlay is enabled.
+
+Custom remote backend origins use optional host permissions instead of broad default host access.
+
+## Request Context And Diagnostics
+
+The backend adds an `X-Request-ID` header to every response. A caller-provided `X-Request-ID` is accepted only when it is short and uses safe characters; otherwise the backend generates one.
+
+`/diagnostics` is intended for development and demo workflows. It reports counters for analysis requests, feedback, rate limits, labels, sources, cache hits/misses, external service skips/errors, and non-sensitive capability flags. It does not expose URLs, page text, form values, credentials, cookies, screenshots, model paths, or HTML.
+
+## Rate Limiting
+
+`/analyze` and `/report` use process-local in-memory rate limits keyed by route and client host. This is a lightweight development safeguard, not a distributed production limiter.
+
+## TLS In Backend
+
+Chrome extensions cannot reliably inspect full certificate details from page scripts. PhishLens performs TLS checks from the backend using Python sockets and the system trust store.
+
+This can differ from what the browser sees when the user is behind a corporate proxy, local antivirus TLS inspection, captive portal, or custom trust store.
+
+## Domain Age In Backend
+
+PhishLens looks up domain registration age via the public RDAP bootstrap service
+(`rdap.org`), which redirects to the domain's authoritative registry RDAP server. Only
+the hostname is sent, no path or query string. A missing registration event (common with
+privacy-protected WHOIS records) is not treated as suspicious — it is just as common for
+legitimate domains as for phishing domains, so it contributes 0 to the score rather than
+being penalized.
+
+## Text Diagram
+
+```text
+[Chrome tab]
+    |
+    | DOM counts only
+    v
+[Content script] ---- message ----> [Popup React UI]
+                                     |
+                                     | settings
+                                     v
+                              [Options page]
+                                     |
+                                     | POST /analyze
+                                     v
+                             [FastAPI backend]
+                              |      |      |       |        |
+                              v      v      v       v        v
+                         [PhishTank] [TLS] [RDAP] [ML model] [Diagnostics]
+                              ^      ^      ^
+                              |      |      |
+                            TTL cache
+```

@@ -1,0 +1,169 @@
+# Changelog
+
+All notable changes to this project are documented here.
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+---
+
+## [Unreleased]
+
+## [0.4.0] — 2026-09-29 — one score scale, honest ML metrics, and real demo assets
+
+### Added
+
+- **Confidence calibration reliability diagram**: `ml/evaluate_confidence_calibration.py` reconstructs the URL-only heuristic score for every row of the committed dataset, computes the heuristic-only `_confidence()` fallback used when ML is unavailable, and bins predicted confidence against empirical accuracy. Result: every bin sits below the perfectly-calibrated diagonal (mean calibration error 0.397), and the bin holding 96% of rows is only ~52% accurate — the formula is measurably overconfident, not just an unverified proxy. Documented in `docs/ml-methodology.md` with the generated `ml/calibration_reliability_diagram.png`, including why this wasn't "fixed" with a quick correction factor (it would calibrate to this offline benchmark's blind spots, not real-world accuracy).
+- **Certificate Transparency log signal**: `tls_service.py` now also queries `crt.sh` (no API key, fixed third-party host — same SSRF-avoidance property as the RDAP domain-age lookup) for every TLS-checked hostname, run concurrently with the existing socket-based certificate inspection via `asyncio.gather`. `TLSResult` gains `ct_logs_checked`, `ct_first_seen_days_ago` (days since the domain's *oldest* CT log entry — i.e. how long its certificate history has existed, not its most recent certificate), and `ct_error`. `scoring_service._score_tls` adds +6 risk points (within the existing TLS category cap of 15) when the domain's first-ever certificate is less than a week old, additive alongside the existing expired/expiring/invalid checks. Best-effort: a crt.sh failure or timeout never blocks the rest of the TLS result. New `PHISHLENS_ENABLE_CT_LOG_LOOKUP` setting (default enabled); disabled by default in the test suite (same pattern as domain-age) to avoid real network calls.
+- **Externalized brand-domain list**: the curated brand list used for typosquat/combosquat/brand-impersonation detection moved from a hardcoded array to a JSON config file on each side (`backend/app/data/brand_domains.json`, `extension/src/data/brand-domains.json`), with the same 26 domains as the seed/default. The backend loads its copy via a new `PHISHLENS_BRAND_DOMAINS_PATH` setting (same pattern as `PHISHLENS_MODEL_PATH`), falling back to a small built-in seed if the configured file is missing or malformed — operators can expand brand coverage by editing or pointing at a different JSON file, with no code change or redeploy. The extension's copy stays a bundled JSON file (not a live endpoint): fetching the list at runtime would add a network dependency and a new permission to a signal that works fully offline today, for a list that changes rarely enough to ship with each release.
+- **Experimental Firefox groundwork via `webextension-polyfill`**: every extension source file (`background/service-worker.ts`, `content/dom-analyzer.ts`, `warning/overlay.ts`, `popup/Popup.tsx`, `services/settings.ts`) now calls `browser.*` instead of `chrome.*`, with message listeners returning `Promise<unknown> | undefined` instead of the callback-based `sendResponse`/`return true` pattern. `manifest.json` adds `browser_specific_settings.gecko` (a no-op for Chrome) and declares `background.scripts` alongside `background.service_worker` — the standard cross-browser pattern, since Firefox's MV3 background is an event-page `scripts` entry while Chrome uses the service worker and ignores `scripts` (verified Chrome-safe by the E2E smoke test). The two MV3-only namespaces the polyfill predates (`action`, `scripting`) are called directly through `browser.action`/`browser.scripting`, which both engines already expose as native Promise APIs. **Status: experimental.** Verified against the full Chrome-targeted test suite, the real-Chromium E2E smoke test, and the build; **not** yet loaded or click-tested in a real Firefox profile, and module background scripts are not supported on every Firefox 115+ build — treat Firefox as unverified, not as a parity guarantee. See `docs/roadmap.md`.
+- **Brand-impersonation DOM signals**: the content script (`dom-analyzer.ts`) now flags `brand_text_mismatch` (the page's visible title, `og:site_name`, or first `<h1>` names a known brand — reusing the same curated `KNOWN_BRAND_DOMAINS` list as typosquat detection — whose registrable domain doesn't match the current page) and `favicon_hotlinked_brand` (the favicon `<link>` points at a different origin that is itself a known brand domain, a common phishing-kit laziness pattern). Both are zero-network and require no new permission: no favicon bytes are fetched or hashed. Scored as +12 and +8 respectively within the existing `dom` risk category (cap 30), mirrored in `risk-score.ts` and `scoring_service.py`. This catches cloned login pages hosted on domains with no lexical resemblance to the impersonated brand (e.g. a throwaway `.tk` domain), which typosquat detection — which only compares the domain string — would miss. Limitation: coverage is bounded by the same small curated brand list used for typosquat detection, and there is no image/logo-based visual detection.
+- **RDAP domain-age signal**: new `domain_age` risk category (cap 20) backed by `backend/app/services/domain_age_service.py`, querying the free `rdap.org` bootstrap service (no API key, no SSRF exposure to the analyzed host since it always targets `rdap.org`). Domains registered in the last 30/180 days add risk score; missing or privacy-protected registration data scores 0. Cached 24h on success, 30s on transient error, same pattern as `tls_service.py`/`phishtank_service.py`. Wired through backend schemas, `scoring_service.py`, `/diagnostics` capabilities, and the extension's risk breakdown, signal grouping, and Options capability grid.
+- **ML model warm-up at startup**: `ml_service.warm_up_model()` is now called from a FastAPI `lifespan` handler in `main.py`. Unpickling the scikit-learn estimator triggers a one-time, multi-second lazy import of sklearn's compiled submodules; previously this cost landed on whichever user request happened to be first (observed: ~5.5s, exceeding the extension's 2.5s default timeout and causing a spurious "Backend unavailable" fallback) and blocked the event loop for concurrent requests. First `/analyze` call after startup dropped from ~5.5s to ~1.4s.
+- **Heuristic engine backtest**: `ml/evaluate_heuristics.py` backtests `_score_url`'s point weights against the real dataset (numeric features only — typosquat/homograph can't be backtested without raw domains, which the dataset deliberately doesn't store). Result documented in `docs/ml-methodology.md`: typosquat/homograph detection carries most of the URL category's weight; no weights changed based on this baseline.
+- **Per-prediction ML explainability**: `ml_service.py` now builds a `shap.TreeExplainer` once alongside the cached model and computes per-prediction SHAP values at inference time, surfacing the top 2 contributing features as `MLResult.top_factors`. Surfaced as a `"Top ML factors: ..."` reason in the `ml` risk-breakdown category whenever the ML adjustment is non-zero. This is genuinely per-instance (two URLs that both raise risk can cite different top factors), not just the model's global `feature_importances_`. Best-effort: falls back to no explanation if SHAP can't explain the loaded model type, without affecting the prediction itself.
+- **Temporal validation**: `ml/evaluate_temporal_drift.py` trains on PhishTank URLs submitted more than 2 years ago and tests on URLs submitted in the last 14 days (using the dump's `submission_time` field), with a disjoint Tranco rank window for legitimate URLs. Result: 0.91 accuracy, within noise of the random-split CV/hold-out numbers — the model generalizes to phishing campaigns well outside its training window, not just memorizing snapshot-specific quirks. Documented in `docs/ml-methodology.md` along with the explicit limitation that Tranco has no time axis (only the phishing side is genuinely temporal).
+
+### Fixed
+
+- **README walkthrough looked laggy**: the walkthrough was an animated WebP cut from a screen recording, first 1280 px at 20 fps, then 30 fps, then 1600 px at 60 fps (up to ~19 MB). Every version still read as laggy: the camera zooms moved continuously, and the take held completely still for 2-3 s at a time. It is replaced by `docs/screenshots/demo.gif`, a ~16 s slideshow of six sharp screenshots of the real extension. Each slide has a one-line caption and a 0.24 s crossfade to the next. The GIF is 1280×796 and ~7.6 MB, and `docs/screenshots/demo.webp` is removed. So is the old scripted-GIF compositor (`extension/scripts/compose_demo_gif.py`), which wrote to the same `demo.gif` path and would have overwritten the slideshow. How the GIF is built, and why, is in `docs/demo-gif-script.md`.
+- **Backend CI broke when Ruff 0.16 was released**: `requirements-dev.txt` allows any `ruff<1.0` and the repo had no Ruff config, so CI inherited each release's default rules. Ruff 0.16.9 enables many more families by default (import sorting, SIM, BLE, UP, TRY, …) and reported 31 errors on unchanged `develop` code. The project now adopts Ruff 0.16's defaults and fixes every finding. Ruff is pinned to `>=0.16.9,<0.17`, because defaults change between minors. A root `ruff.toml` sets `target-version = "py311"` and keeps the previous `E4`/`E7`/`E9` rules on top, since 0.16's defaults keep only two `E` rules. The change adds checks and removes none. Across `backend/`, `ml/`, `demo/`, and `scripts/ci/` there were 74 findings:
+  - 58 safe auto-fixes: import sorting, `datetime.UTC`, the builtin `TimeoutError`, and unused `noqa`s.
+  - Nested `with` blocks were merged.
+  - `fromisoformat` now receives the `Z` suffix directly, which Python 3.11 accepts.
+  - `min()` replaced `sorted()[0]`, and a `dict()` call became a literal.
+  - The deliberate broad `except`s in best-effort paths (TLS inspection, the ML fallback, `/health`, dataset downloads) and the crt.sh `ValueError` keep a `noqa` that states why.
+- **Extension build-tool advisories failed `npm audit --audit-level=high`**: new advisories against dev and build dependencies (none shipped in the extension bundle) would have failed Security CI: `nanoid` ≤ 3.3.17, `postcss` ≤ 8.5.22, `sharp` < 0.35.4 (high), and `@vitest/mocker` < 4.1.11 (moderate). The lockfile now resolves `nanoid` 3.3.19, `postcss` 8.5.28, and `sharp` 0.35.5, and `vitest` / `@vitest/coverage-v8` move to ^4.1.11. `npm audit` reports 0 vulnerabilities. The lockfile also drops `esbuild`, an optional peer of Vite 8 that nothing in the project uses. The lockfile was regenerated with npm 11.20, because the local npm 11.1.0 crashes in `audit fix` (`Cannot read properties of null (reading 'edgesOut')`).
+- **ML adjustment was sized to in-dataset confidence, not to new phishing**: `_adjustment_from_probability` mapped probabilities to −10 / −5 / 0 / +12 / +20. The new `ml/evaluate_ml_adjustment.py` measures the likelihood ratio of each probability band on out-of-fold CV and on the temporal split (model trained on phishing over two years old, scored on phishing from the last 14 days). On new phishing, p ≥ 0.85 is no stronger than 0.65–0.85 (LR 11.0 vs 11.2), so +20 is gone. p ≤ 0.20 held 19% of new phishing at LR 0.42 (0.04 in CV), so −10 was subtracting 10 points from about 1 in 5 current phishing pages. The mapping is now +12 for p ≥ 0.65, −5 for p ≤ 0.35, and 0 otherwise (`ML_MIN_ADJUSTMENT` / `ML_MAX_ADJUSTMENT` = −5 / 12 on both sides). On the temporal split it raises 2.3% of legitimate URLs and lowers 32.7% of phishing URLs, now by 5 points at most. `evaluate_temporal_drift.py` exposes `build_temporal_split` and `make_model` so both scripts share the same split.
+- **Feedback store test broke with the calendar, and the store leaked connections**: `test_sqlite_store_persists_across_instances` recorded an entry dated 2026-06-17, and every `SQLiteFeedbackStore` purges entries older than 30 days when it opens. Once that date aged out, the second instance deleted the entry and the test failed on every machine. The test entries now use recent timestamps. Two store bugs were fixed next to it. `with sqlite3.connect(...)` only commits and never closes, so every operation left a connection open until garbage collection; `_connect` now closes it. Retention compared ISO strings (`2026-08-30T01:00:00+00:00`) with SQLite's `2026-08-30 12:00:00` format, which kept rows from the cutoff day up to about a day too long; it now compares `datetime(created_at)`. New tests cover retention and connection closing.
+- **ML model scored any subdomain as phishing (real PayPal false positive)**: `build_dataset.py` added realistic paths to legitimate Tranco URLs but kept their hosts bare, so 599 of 600 legitimate rows had no subdomain and the model learned "has a subdomain" as phishing. `www.paypal.com/signin` got +20 while `paypal.com/signin` got −10, and the real PayPal sign-in page scored Suspicious 36 in the demo recording. `feature_extractor.py` and `url-features.ts` no longer count a leading `www` as a subdomain or a dot. `build_dataset.py` gives 35% of legitimate URLs a service subdomain and 35% `www.` (`realistic_legit_url`, also used by `evaluate_temporal_drift.py`). Dataset rebuilt (2026-09-29 snapshot) and model retrained as `0.4.0-real`: `www.paypal.com` and `accounts.google.com` now get −5. Honest metrics drop from 99.0% precision / 0.8% FPR to 78.5% / 22.3% (recall 82.2% → 81.7%), and temporal validation from 0.91 to 0.67 accuracy (phishing recall 0.42). Re-running it on the new snapshot without realistic hosts gives 0.83, so most of that drop is the removed shortcut. New tests guard the `www` rule (both languages, plus a contract vector) and the legitimate-subdomain share of the committed dataset. Also fixed the reliability-diagram link in `docs/ml-methodology.md`, which pointed at `docs/` instead of `ml/`.
+- **Local and backend scores used different scales**: the extension scaled URL + DOM points onto 0-100 (`(url + dom) / 65 × 100`), but the backend added the same points unscaled. The same page therefore changed score, and sometimes label, when the backend answered. The cloned PayPal login in the demo recording read Dangerous 95 locally and then 74 from the backend; without the ML's +12 it would have been 62, Suspicious. That also meant URL and DOM evidence alone could never reach "dangerous" on the backend (maximum 65). `scoring_service.py` now starts from the same scaled heuristic score as the extension (`scale_heuristic_score`) and adds threat intel, TLS, domain age, and ML on top, so the backend score is the local score plus enrichment. `contracts/scoring-vectors.json` gains `heuristic_score` and `label` per vector, asserted on both sides, plus a vector for that cloned login.
+- **Popup claimed "Backend enrichment is not active" while the backend was being queried**: the local result shown during the `/analyze` request used the `local-only` mode, whose banner reads as a final verdict. It is now `checking` ("Local result. Waiting for backend enrichment..."), `local-only` is gone (nothing else produced it), and the popup sets `aria-busy` until the backend answers or fails. `scripts/record-demo.mjs` waited only for the first score to appear, so it captured this in-flight state whenever `/analyze` was slower than its fixed delay, and a Refresh click could not help because the score was already on screen. It now waits for `aria-busy="false"` and fails loudly if the backend did not answer.
+- **No demo page produced "Suspicious"**: `demo/pages/suspicious.html` scored Safe 15 (a form, one iframe, and two external links). It now has a sign-in form with a password field that posts to another domain, which lands at 48 and stays Suspicious for any ML adjustment. `e2e/smoke.mjs` loads all three demo pages in real Chromium and asserts the toolbar badge for each. `demo/README.md` pointed at `127.0.0.1`, which the backend rejects as a private IP, so it now uses `localhost`.
+- **Chrome Web Store screenshots were mockups**: `scripts/take-screenshots.mjs` hand-wrote an HTML copy of the popup with invented data (a "60%" heuristic confidence, a removed punycode reason, ML adjustments of −9 and +6 that the model cannot produce, an old overlay design). It now frames real captures from `record-demo.mjs --docs`.
+- **Content script and danger overlay were broken in real browsers (critical)**: when Firefox support was added (`browser` via `webextension-polyfill`), the content script (`dom-analyzer.ts`) and the warning overlay (`overlay.ts`) started shipping with an ES `import` statement — but both execute as classic, non-module scripts (MV3 content scripts cannot declare `"type": "module"`, and the same applies to files injected via `chrome.scripting.executeScript`). The result: `chrome.tabs.sendMessage` to the content script failed with "Could not establish connection. Receiving end does not exist." in a real Chromium session — DOM features and the danger overlay silently stopped working — while `tsc`, `vitest`, and `vite build` all stayed green, because none of them execute the bundle in a real browser. Found while recording the README demo GIF with a real Playwright + Chromium session. Fixed by splitting the build into two passes (`vite.config.ts`, new `scripts/build.mjs`): one ES-module pass for popup/options/the service worker, one IIFE pass (Rollup inlines shared dependencies instead of extracting a shared chunk) for the content script and the overlay.
+- **ML dataset url-length bias**: legitimate URLs (Tranco roots) and phishing URLs (PhishTank, real paths) were nearly perfectly separable by `url_length` alone, letting the model learn "has a path" instead of phishing patterns. `build_dataset.py` now appends realistic paths to ~80% of legitimate URLs; CV accuracy dropped from an inflated 0.954 to a more honest 0.907. Regression test added in `test_ml_dataset_builder.py`.
+- **Local-only "dangerous" label unreachable**: the extension's offline fallback scorer used a special threshold (60, not 70) because its raw max (65) was below the backend's. `risk-score.ts` now scales the local score onto the same 0-100 range before applying the backend's thresholds, so "dangerous" is reachable without backend enrichment.
+
+- **IDN scoring canonicalization**: backend URL normalization now converts Unicode hostnames to IDNA ASCII to match the extension fallback, while punycode markers and punycode-internal hyphens are treated as representation details rather than standalone risk signals.
+- **Typosquatting and combosquatting detection**: `feature_extractor.py` (backend) and `url-features.ts` (extension) now compare the registrable label against a curated list of frequently-impersonated brand domains using Levenshtein distance (catches near-misses like `paypa1.com` and `paypa1.net`) and hyphen-delimited combo matching (catches combosquats like `paypal-secure-login.com`). A match adds 14 URL risk points and surfaces a `"Domain closely resembles <brand> (possible typosquatting)"` reason. Mirrored identically between backend and extension fallback scoring, with parity tests in both `test_scoring_parity.py` and `risk-score.test.ts`.
+- **Unicode homograph detection**: replaces the previous punycode-presence-only signal with real IDN spoofing detection. Each registrable label is IDNA-decoded (a self-contained RFC 3492 punycode decoder in the extension, `label.encode("ascii").decode("idna")` in the backend — no new dependencies) and run through a confusable-character table (Cyrillic/Greek look-alikes, e.g. Cyrillic "а" → "a") before the existing typosquat comparison, so full-script spoofs like the classic `xn--80ak6aa92e.com` ("аррӏе.com") now match `apple.com` at distance 0 and score +16 with a `"...look-alike Unicode characters... (homograph attack)"` reason. A second, independent signal flags any label mixing two or more Unicode scripts (e.g. Latin + Cyrillic in `gооgle.com`) for +8, even when it doesn't match a known brand. Mirrored between `feature_extractor.py` and `url-features.ts` with parity tests.
+- **Real ML training dataset**: `ml/datasets/real_phishing_urls.csv` (1200 rows: 600 verified PhishTank phishing URLs + 600 Tranco top-50k legitimate domains) is now built and committed — the model previously shipped was trained on the 13-row synthetic demo set despite `ml-methodology.md` describing a real-dataset pipeline. The CSV holds only the 16 numeric features and a label, never raw URLs, so it carries no privacy risk. Retrained model (`v0.3.0-real`): 0.954 ± 0.009 stratified 5-fold CV accuracy, 0.95 hold-out accuracy. `ml/datasets/build_dataset.py` fixed to use the current Tranco download endpoint (the old `latest/full` alias was retired; the list is now a zip), HTTPS for the PhishTank dump, and the backend URL feature extractor to avoid training/inference skew. `ml/evaluate_model.py` now validates the saved artifact's dataset metadata, and the backend runtime artifact is packaged at `backend/app/models/phishlens_model.joblib`.
+
+---
+
+## [0.3.0] — 2026-06-22 — stabilization, security hardening, and portfolio polish
+
+### Added
+
+- **SSRF protection**: `url_normalizer.py` now blocks private and loopback IP literals (`127.x`, `10.x`, `192.168.x`, `::1`, link-local, etc.) using Python's `ipaddress` module. Hostnames that _resolve_ to private addresses remain an accepted risk (DNS-based SSRF), documented in `docs/threat-model.md`.
+- **Private-IP SSRF tests**: parametrized `pytest` cases cover IPv4 loopback, RFC-1918 ranges, IPv6 loopback, link-local, and a public IP allow-case.
+- **`isAnalysisResponse` runtime guard**: `analysis-api.ts` validates the `/analyze` response shape before casting — malformed backend payloads now return `null` instead of silently propagating an invalid object.
+- **Port/protocol origin check for form actions**: `hasExternalAction` in `dom-analyzer.ts` now compares the full origin (`scheme + host + port`) instead of hostname only. A form targeting `http://site.com:9999` from an `https://site.com` page is now correctly flagged as cross-origin.
+- **`SECURITY.md`**: vulnerability disclosure policy with scope, reporting contact, and a summary of the accepted risks already documented in `docs/threat-model.md`.
+- **`.github/CODEOWNERS`**: default repository ownership.
+- **Test coverage reporting**: `pytest-cov` (backend) and `vitest --coverage` (extension) wired into CI, uploaded to Codecov (`codecov/codecov-action@v5`) with a badge in the README. Backend coverage: 87%. Extension coverage: 82% (up from 59% after adding `@testing-library/react` render tests for `Popup.tsx` and `Options.tsx`).
+- **`backend/tests/test_scoring_service.py`**: regression tests for the mutually-exclusive TLS scoring fix below.
+- **`extension/src/popup/Popup.render.test.tsx` and `extension/src/options/Options.render.test.tsx`**: component-level tests covering loading states, backend-enriched/unavailable modes, feedback submission, and settings save/refresh flows.
+- Repository metadata: GitHub topics and homepage URL set to the project site.
+
+### Changed
+
+- **PhishTank transport**: `PHISHTANK_CHECK_URL` switched from `http://` to `https://`. API key and URL are no longer transmitted in cleartext.
+- **TLS scoring**: restructured to be mutually exclusive — an expired certificate now emits one reason ("appears to be expired", 15 pts) instead of two ("could not be validated" + "expired", 25 pts before cap). Order: expired → nearly expired → invalid → error.
+- **Local `dangerous` threshold**: lowered from 70 to 60 in `risk-score.ts`. The local scorer's maximum is `URL_SCORE_CAP(35) + DOM_SCORE_CAP(30) = 65`, making 70 permanently unreachable without backend enrichment. The new threshold makes `dangerous` achievable in local-only mode.
+- **URL fragment normalisation**: `analyzeLocally()` strips the URL fragment before extracting features, matching the backend's `normalize_url` behaviour and preventing divergent scores for the same page.
+- **Cache privacy**: `writeCachedAnalysis` now strips the query string and fragment from the `url` field stored in `chrome.storage.local`. The cache key (SHA-256 of the full URL) is unchanged; only the persisted value is sanitised.
+- **ML dataset row check**: `train_model.py` now applies separate thresholds — ≥ 100 rows for the real dataset, ≥ 4 rows for the synthetic demo. The previous flat `< 20` check broke the included 12-row demo CSV.
+- **`dom-analyzer.ts` content script**: top-level `await chrome.runtime.sendMessage(…)` wrapped in an async IIFE. MV3 content scripts are classic scripts (not ES modules) and cannot use top-level `await`.
+- **`PHISHLENS_MODEL_PATH` default**: `.env.example` corrected from `../ml/models/…` (relative to `backend/`) to `ml/models/…` (relative to the repo root where `uvicorn` is invoked).
+
+### Fixed
+
+- **`chrome-web-store.md`**: corrected privacy disclosure — feedback _is_ persisted in SQLite (hostname, label, note presence, request ID, timestamp), not "not durably stored".
+- **Dead imports** in `ml/datasets/build_dataset.py`: removed unused `re` and `unicodedata` imports that caused `ruff F401` failures.
+- **`pr_guardian.py`**: the sensitive-surface-docs check only recognized `.test.ts` as a test-only file, not `.test.tsx` — the first JSX test files in the repo were incorrectly flagged as undocumented sensitive-surface changes.
+
+---
+
+## [0.2.2] — portfolio hardening
+
+### Added
+
+- **CI badges** in README linking to backend, extension, and security workflows on GitHub Actions.
+- **Quick Start** section in README: five commands to get the project running locally.
+- **Environment variables table** in README with default values and descriptions for all `PHISHLENS_*` settings.
+- **`CONTRIBUTING.md`**: setup, test commands, commit conventions, and PR checklist.
+- **`diagnostics_token` auth**: `GET /diagnostics` now checks `X-Diagnostics-Token` header when `PHISHLENS_DIAGNOSTICS_TOKEN` is set; returns `401` on mismatch. Closes the gap between `.env.example` documentation and actual enforcement.
+- **JSON structured logging**: `app/core/logging_config.py` configures the root logger with a stdlib JSON formatter. Every log record emits `timestamp`, `level`, `logger`, `message`, and any extra fields (e.g. `request_id`, `method`, `path`, `status_code`, `duration_ms`).
+- **React Error Boundary**: `ErrorBoundary.tsx` wraps the popup root. Unhandled render errors show a user-facing fallback with a "Try again" button instead of a blank popup.
+- **`content_security_policy`** field added to `manifest.json` (`script-src 'self'; object-src 'none'`), making the MV3 default explicit and auditable. CSP meta tags added to `popup.html` and `options.html` for tooling visibility.
+- **`Options.test.ts`**: unit tests for `diagnosticsLabelFor()` covering all `BackendStatus` states.
+- **`ml/datasets/build_dataset.py`**: downloads PhishTank verified phishing URLs and Tranco top-1M legitimate domains, extracts URL features, and writes `real_phishing_urls.csv` (~1 200 balanced rows). DOM features are 0 for all rows (browser context required).
+- **ML methodology docs**: `docs/ml-methodology.md` updated with dataset sources table, build instructions, and metrics guidance.
+- **GitHub Pages link** added to README header.
+- **Link to `docs/ml-methodology.md`** added to README.
+
+### Changed
+
+- **`requestBackendAnalysis` retry logic**: 5xx responses (transient server errors) now fall through to the retry loop. 4xx responses (429, 422, etc.) still return `null` immediately. Previously, all non-2xx responses skipped retry.
+- **`isDOMFeatures` type guard**: `collectDomFeatures()` in `Popup.tsx` now validates the content script response shape before casting, falling back to `EMPTY_DOM_FEATURES` on unexpected payloads.
+- **`train_model.py`** auto-detects `real_phishing_urls.csv` and falls back to the synthetic demo set; version string updates accordingly (`0.3.0-real` / `0.2.0-synthetic`).
+- **`docs/permissions.md`** updated to document the new `content_security_policy` manifest field.
+- **Configuration section** in README reformatted from bullet list to a table with default values.
+
+### Fixed
+
+- **`FeedbackStore.count()` race condition**: method now acquires `self._lock` before executing the `SELECT COUNT(*)` query, consistent with `record()`.
+- **`docker-compose.yml`** now includes `security_opt: [no-new-privileges:true]`, `read_only: true`, `cap_drop: [ALL]`, and a `tmpfs` mount for `/tmp`. Previously the CHANGELOG documented this hardening but the compose file did not reflect it.
+- **30-day feedback retention**: `_init_schema()` runs `DELETE FROM feedback WHERE created_at < datetime('now', '-30 days')` on store startup.
+- **Dead `_now_utc()` removed** from `feedback_store.py` (was already unused after a prior refactor).
+
+### Security
+
+- Diagnostics endpoint now enforces token authentication when `PHISHLENS_DIAGNOSTICS_TOKEN` is configured.
+- Docker container now runs with a read-only root filesystem and no Linux capabilities.
+- Extension pages now declare explicit CSP in `manifest.json`.
+
+---
+
+## [0.2.1] — review fixes
+
+### Added
+
+- Proactive badge updates via `PHISHLENS_PAGE_READY` from content script.
+- SHA-256 cache key for `chrome.storage.local` (replaced 32-bit polynomial hash).
+- Expired cache eviction on read (5-minute TTL enforced at read time).
+- Retry logic on transient network errors in `requestBackendAnalysis`.
+- Health check with real dependency probes (`FEEDBACK_STORE.count()`, `is_model_available()`); returns `503` when feedback store is unavailable.
+- `TTLCache` max-size with LRU-style eviction.
+- ML model SHA-256 audit log on first load.
+- PR Guardian script enforcing Chrome permission allowlist, secret scanning, and scoring test coupling.
+- SSRF guard: accepted risk of DNS-based SSRF documented in `docs/threat-model.md`.
+
+### Changed
+
+- Extension CI uses `npm ci` for reproducible installs.
+- Options page gained system-preference-aware dark mode.
+- Structured risk breakdown (URL / DOM / threat intel / TLS / ML) sourced from `risk_breakdown` field.
+- Strict `mypy --strict` added to backend CI.
+
+### Fixed
+
+- Multi-stage Docker build: lean runtime image with no pip, git, or compiler.
+- `.env.example` restored with `PHISHLENS_DIAGNOSTICS_TOKEN` and inline comments.
+
+---
+
+## [0.2.0]
+
+- Added reproducible local safe, suspicious, and dangerous demo pages.
+- Added backend request IDs, diagnostics counters, sanitized validation responses, and in-memory rate limiting.
+- Added explicit localhost-only demo threat source guarded by `PHISHLENS_ENABLE_DEMO_THREAT_SOURCE`.
+- Improved popup status clarity for backend-enriched, local-only, cached, and backend-unavailable modes.
+- Added privacy-preserving report copy from the extension popup.
+- Added `npm run package` to generate a loadable Chrome extension zip.
+- Updated CI to validate demo linting and extension packaging.
+- Expanded README, architecture, privacy, demo, roadmap, and release-process documentation.
+
+## [0.1.0]
+
+- Initial public release with Chrome MV3 extension, FastAPI backend, hybrid scoring, demo ML pipeline, Docker, CI, and core documentation.

@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "PhishLens",
+  "version": "0.4.0",
+  "description": "Defensive real-time phishing risk analysis for the current page.",
+  "icons": {
+    "16": "icons/phishlens-16.png",
+    "48": "icons/phishlens-48.png",
+    "128": "icons/phishlens-128.png"
+  },
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": ["http://localhost:8000/*", "http://127.0.0.1:8000/*"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "{a8987913-e459-4a15-888c-d5cc426d560d}",
+      "strict_min_version": "115.0"
+    }
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'"
+  },
+  "action": {
+    "default_popup": "src/popup/popup.html",
+    "default_title": "PhishLens",
+    "default_icon": {
+      "16": "icons/phishlens-16.png",
+      "48": "icons/phishlens-48.png",
+      "128": "icons/phishlens-128.png"
+    }
+  },
+  "options_ui": {
+    "page": "src/options/options.html",
+    "open_in_tab": false
+  },
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "scripts": ["background/service-worker.js"],
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content/dom-analyzer.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
