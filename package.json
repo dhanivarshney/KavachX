@@ -1,0 +1,14 @@
+{
+  "name": "kavachx",
+  "version": "2.5.0",
+  "private": true,
+  "description": "KavachX — Website Threat Intelligence & Phishing Defense Platform",
+  "scripts": {
+    "start": "npm --prefix PhishLens/dashboard run dev",
+    "dev": "npm --prefix PhishLens/dashboard run dev",
+    "build": "npm --prefix PhishLens/dashboard run build",
+    "lint": "npm --prefix PhishLens/dashboard run lint",
+    "dashboard": "npm --prefix PhishLens/dashboard run dev",
+    "backend": "python -m uvicorn app.main:app --app-dir PhishLens/backend --host 0.0.0.0 --port 8000 --reload"
+  }
+}

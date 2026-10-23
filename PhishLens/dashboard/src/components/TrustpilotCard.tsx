@@ -9,24 +9,35 @@ interface TrustpilotCardProps {
 
 export default function TrustpilotCard({ domain }: TrustpilotCardProps) {
   const [data, setData] = useState<TrustpilotResponse | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
+  const [loading, setLoading] = useState<boolean>(Boolean(domain));
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!domain) return;
     let cancelled = false;
-    setLoading(true);
-    setError(null);
 
-    getTrustpilotReputation(domain)
+    // Extract bare hostname if full URL was passed
+    let cleanHost = domain;
+    try {
+      if (domain.startsWith("http://") || domain.startsWith("https://")) {
+        cleanHost = new URL(domain).hostname;
+      }
+    } catch {
+      cleanHost = domain;
+    }
+
+    getTrustpilotReputation(cleanHost)
       .then((res) => {
-        if (!cancelled) setData(res);
+        if (!cancelled) {
+          setData(res);
+          setLoading(false);
+        }
       })
       .catch((err) => {
-        if (!cancelled) setError(err.message);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setError(err.message);
+          setLoading(false);
+        }
       });
 
     return () => {
@@ -36,10 +47,10 @@ export default function TrustpilotCard({ domain }: TrustpilotCardProps) {
 
   if (loading) {
     return (
-      <div className="rounded-3xl border border-slate-800/80 bg-slate-900/40 p-5 backdrop-blur-xl animate-pulse space-y-3">
-        <div className="h-4 bg-slate-800 rounded w-1/3"></div>
-        <div className="h-8 bg-slate-800 rounded w-1/2"></div>
-        <div className="h-4 bg-slate-800 rounded w-3/4"></div>
+      <div className="rounded-2xl border border-slate-200/90 bg-white p-5 shadow-card animate-pulse space-y-3">
+        <div className="h-4 bg-slate-100 rounded w-1/4"></div>
+        <div className="h-6 bg-slate-100 rounded w-1/3"></div>
+        <div className="h-10 bg-slate-100 rounded"></div>
       </div>
     );
   }
@@ -52,90 +63,91 @@ export default function TrustpilotCard({ domain }: TrustpilotCardProps) {
 
   return (
     <div
-      className={`rounded-3xl border p-5 sm:p-6 backdrop-blur-xl transition-all ${
+      className={`rounded-2xl border p-5 sm:p-6 shadow-card transition-all ${
         isScam
-          ? "bg-rose-500/10 border-rose-500/30"
-          : "bg-slate-900/60 border-slate-800/80"
+          ? "bg-rose-50/20 border-rose-200"
+          : "bg-white border-slate-200/90"
       }`}
     >
       {/* Header */}
       <div className="flex items-start justify-between gap-4 mb-4">
         <div className="flex items-center gap-3">
           <div
-            className={`p-2.5 rounded-2xl ${
+            className={`p-2 rounded-xl shrink-0 ${
               isScam
-                ? "bg-rose-500/20 text-rose-400 border border-rose-500/30"
-                : "bg-cyan-500/20 text-cyan-400 border border-cyan-500/30"
+                ? "bg-rose-100 text-rose-700 border border-rose-200"
+                : "bg-blue-50 text-blue-700 border border-blue-100"
             }`}
           >
             {isScam ? <ShieldAlert size={18} /> : <CheckCircle2 size={18} />}
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <span className="text-[10px] font-mono uppercase tracking-wider text-slate-400">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
                 Community Reputation
               </span>
               <span
-                className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded-full border ${
+                className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${
                   isScam
-                    ? "bg-rose-500/20 text-rose-300 border-rose-500/40"
-                    : "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
+                    ? "bg-rose-50 text-rose-700 border-rose-200"
+                    : "bg-emerald-50 text-emerald-700 border-emerald-200"
                 }`}
               >
-                {isScam ? "Unreviewed Zero-Day Site" : "Verified Brand"}
+                {isScam ? "Unverified / Zero-Day Target" : "Established Footprint"}
               </span>
             </div>
-            <h3 className="text-sm font-bold text-white flex items-center gap-1.5 mt-0.5">
-              Trustpilot Intelligence
+            <h3 className="text-sm font-semibold text-slate-900 mt-0.5">
+              Consumer Trust Intelligence
             </h3>
           </div>
         </div>
 
-        {/* Live Trustpilot External Link */}
-        <a
-          href={data.trustpilot_url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 text-[11px] font-mono font-bold text-cyan-400 hover:text-cyan-300 bg-slate-800/80 hover:bg-slate-800 px-3 py-1.5 rounded-xl border border-slate-700/60 transition-colors"
-        >
-          <span>Trustpilot Page</span>
-          <ExternalLink size={11} />
-        </a>
+        {data.trustpilot_url && (
+          <a
+            href={data.trustpilot_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200/80 px-2.5 py-1 rounded-lg border border-slate-200 transition-colors"
+          >
+            <span>View Source</span>
+            <ExternalLink size={12} />
+          </a>
+        )}
       </div>
 
-      {/* Main Score & Stars Row */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4 p-3.5 rounded-2xl bg-slate-950/60 border border-slate-800/60">
+      {/* Metrics Row */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4 p-3 rounded-xl bg-slate-50 border border-slate-200/60">
         <div>
-          <span className="text-[10px] font-mono text-slate-500 block">Star Rating</span>
+          <span className="text-[11px] text-slate-500 block">Trust Rating</span>
           <div className="flex items-center gap-1.5 mt-0.5">
             <div className="flex text-amber-400">
               {[1, 2, 3, 4, 5].map((star) => (
                 <Star
                   key={star}
-                  size={14}
-                  className={star <= data.star_rating ? "fill-amber-400" : "text-slate-800"}
+                  size={13}
+                  className={star <= data.star_rating ? "fill-amber-400" : "text-slate-300"}
                 />
               ))}
             </div>
-            <span className="text-xs font-mono font-bold text-slate-200">
-              {data.star_rating > 0 ? `${data.trust_score.toFixed(1)} / 5` : "0.0"}
+            <span className="text-xs font-semibold text-slate-900 font-sans">
+              {data.star_rating > 0 ? `${data.trust_score.toFixed(1)} / 5` : "N/A"}
             </span>
           </div>
         </div>
 
         <div>
-          <span className="text-[10px] font-mono text-slate-500 block">Total Reviews</span>
+          <span className="text-[11px] text-slate-500 block">Community Reviews</span>
           <div className="flex items-center gap-1.5 mt-0.5">
-            <MessageSquare size={13} className="text-slate-500" />
-            <span className="text-xs font-mono font-bold text-slate-200">{data.total_reviews}</span>
+            <MessageSquare size={13} className="text-slate-400" />
+            <span className="text-xs font-semibold text-slate-800">{data.total_reviews}</span>
           </div>
         </div>
 
         <div>
-          <span className="text-[10px] font-mono text-slate-500 block">Trust Level</span>
+          <span className="text-[11px] text-slate-500 block">Trust Classification</span>
           <span
-            className={`text-xs font-mono font-bold ${
-              isScam ? "text-rose-400" : "text-amber-400"
+            className={`text-xs font-semibold ${
+              isScam ? "text-rose-600" : "text-emerald-700"
             }`}
           >
             {data.rating_label}
@@ -143,22 +155,22 @@ export default function TrustpilotCard({ domain }: TrustpilotCardProps) {
         </div>
       </div>
 
-      {/* Community Verdict */}
-      <div className="text-xs text-slate-300 leading-relaxed mb-3 bg-slate-950/40 p-3 rounded-2xl border border-slate-800/40">
-        <p className="font-medium">{data.community_verdict}</p>
+      {/* Community Verdict Text */}
+      <div className="text-xs text-slate-700 leading-relaxed mb-3 bg-white p-3 rounded-xl border border-slate-200/60">
+        <p className="font-normal">{data.community_verdict}</p>
       </div>
 
-      {/* Past Reviews / Common Complaints */}
+      {/* Complaints or Indicators */}
       {data.top_complaints && data.top_complaints.length > 0 && (
-        <div className="mt-3 pt-3 border-t border-slate-800/60">
-          <span className="text-[10px] font-mono font-bold text-slate-400 uppercase tracking-wider block mb-2 flex items-center gap-1.5">
-            <AlertTriangle size={12} className={isScam ? "text-rose-400" : "text-amber-400"} />
-            {isScam ? "Scam Indicators" : "Common Consumer Grievances"}
+        <div className="pt-2 border-t border-slate-100">
+          <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider block mb-2 flex items-center gap-1.5">
+            <AlertTriangle size={12} className={isScam ? "text-rose-500" : "text-amber-500"} />
+            {isScam ? "Key Risk Indicators" : "Reported Consumer Concerns"}
           </span>
-          <div className="space-y-1.5">
+          <div className="space-y-1">
             {data.top_complaints.map((item, i) => (
-              <div key={i} className="text-xs text-slate-400 flex items-start gap-2">
-                <span className="text-slate-600 mt-0.5">•</span>
+              <div key={i} className="text-xs text-slate-600 flex items-start gap-2">
+                <span className="text-slate-400 mt-0.5">•</span>
                 <span className="leading-snug">{item}</span>
               </div>
             ))}

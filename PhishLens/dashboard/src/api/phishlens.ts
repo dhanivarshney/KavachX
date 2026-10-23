@@ -114,6 +114,21 @@ export async function getLatestScan(): Promise<ScanRecord | null> {
   }
 }
 
+export interface HealthResponse {
+  status: "ok" | "degraded";
+  service: string;
+  checks: {
+    feedback_store: boolean;
+    ml_model: boolean;
+  };
+}
+
+export async function getHealth(): Promise<HealthResponse> {
+  const res = await fetch(`${BASE}/health`);
+  if (!res.ok) throw new Error(`Health check failed: ${res.status}`);
+  return res.json();
+}
+
 export async function getDiagnostics(): Promise<DiagnosticsResponse> {
   const res = await fetch(`${BASE}/diagnostics`);
   if (!res.ok) throw new Error(`Diagnostics failed: ${res.status}`);

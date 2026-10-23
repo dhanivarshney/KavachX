@@ -9,7 +9,10 @@ from typing import Any
 
 import joblib
 import numpy as np
-import shap
+try:
+    import shap
+except (ImportError, Exception):
+    shap = None
 
 from app.core.config import Settings, get_settings
 from app.schemas.analysis import DOMFeatures
@@ -104,7 +107,7 @@ def _load_artifact(model_path: Path) -> _ModelArtifact:
 
         explainer = None
         try:
-            explainer = shap.TreeExplainer(model)
+            explainer = shap.TreeExplainer(model) if shap is not None else None
         except Exception:  # noqa: BLE001 - not every model type supports TreeExplainer
             logger.info("shap_explainer_unavailable model_type=%s", type(model).__name__)
 
