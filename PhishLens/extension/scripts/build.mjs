@@ -18,3 +18,4 @@ function runViteBuild(buildTarget) {
 runViteBuild("module");
 runViteBuild("content");
 runViteBuild("overlay");
+runViteBuild("emailGuardian");

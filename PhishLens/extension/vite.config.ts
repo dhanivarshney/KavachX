@@ -42,6 +42,7 @@ function copyExtensionAssets() {
 const CLASSIC_TARGETS = {
   content: { domAnalyzer: resolve(__dirname, "src", "content", "dom-analyzer.ts") },
   overlay: { overlay: resolve(__dirname, "src", "warning", "overlay.ts") },
+  emailGuardian: { emailGuardian: resolve(__dirname, "src", "content", "email-guardian.ts") },
 };
 const buildTarget = (process.env.BUILD_TARGET ?? "module") as "module" | keyof typeof CLASSIC_TARGETS;
 
@@ -55,6 +56,7 @@ function entryFileName(chunkName: string): string {
   if (chunkName === "serviceWorker") return "background/service-worker.js";
   if (chunkName === "domAnalyzer") return "content/dom-analyzer.js";
   if (chunkName === "overlay") return "warning/overlay.js";
+  if (chunkName === "emailGuardian") return "content/email-guardian.js";
   return "assets/[name].js";
 }
 

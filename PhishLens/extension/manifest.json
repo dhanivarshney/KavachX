@@ -1,15 +1,22 @@
 {
   "manifest_version": 3,
-  "name": "PhishLens",
+  "name": "KavachX",
   "version": "0.4.0",
-  "description": "Defensive real-time phishing risk analysis for the current page.",
+  "description": "KavachX — Smart Security • Strong Protection. Defensive real-time phishing and webmail fraud risk analysis.",
   "icons": {
     "16": "icons/phishlens-16.png",
     "48": "icons/phishlens-48.png",
     "128": "icons/phishlens-128.png"
   },
   "permissions": ["activeTab", "scripting", "storage"],
-  "host_permissions": ["http://localhost:8000/*", "http://127.0.0.1:8000/*"],
+  "host_permissions": [
+    "http://localhost:8000/*",
+    "http://127.0.0.1:8000/*",
+    "https://mail.google.com/*",
+    "https://outlook.live.com/*",
+    "https://outlook.office.com/*",
+    "https://outlook.office365.com/*"
+  ],
   "optional_host_permissions": ["http://*/*", "https://*/*"],
   "browser_specific_settings": {
     "gecko": {
@@ -22,7 +29,7 @@
   },
   "action": {
     "default_popup": "src/popup/popup.html",
-    "default_title": "PhishLens",
+    "default_title": "KavachX",
     "default_icon": {
       "16": "icons/phishlens-16.png",
       "48": "icons/phishlens-48.png",
@@ -42,6 +49,16 @@
     {
       "matches": ["http://*/*", "https://*/*"],
       "js": ["content/dom-analyzer.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://mail.google.com/*",
+        "https://outlook.live.com/*",
+        "https://outlook.office.com/*",
+        "https://outlook.office365.com/*"
+      ],
+      "js": ["content/email-guardian.js"],
       "run_at": "document_idle"
     }
   ]

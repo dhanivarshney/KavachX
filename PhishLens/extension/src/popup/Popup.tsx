@@ -132,7 +132,7 @@ export function Popup() {
     <main className="popup-shell" aria-busy={loading}>
       <header className="header">
         <div>
-          <p className="eyebrow">PhishLens</p>
+          <p className="eyebrow">KavachX</p>
           <h1>Website Safety</h1>
         </div>
         <div className="header-actions">
