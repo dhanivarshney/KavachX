@@ -5,6 +5,7 @@ import Home from "./pages/Home";
 import Smishing from "./pages/Smishing";
 import TrustReport from "./pages/TrustpilotHub";
 import Stats from "./pages/Stats";
+import DamageControl from "./pages/DamageControl";
 import { ToastProvider } from "./components/Toast";
 
 export default function App() {
@@ -20,6 +21,8 @@ export default function App() {
               <Route path="/smishing" element={<Smishing />} />
               <Route path="/trust-report" element={<TrustReport />} />
               <Route path="/analytics" element={<Stats />} />
+              <Route path="/damage-control" element={<DamageControl />} />
+              <Route path="/sos" element={<DamageControl />} />
 
               {/* Backward compatibility aliases */}
               <Route path="/trustpilot" element={<Navigate to="/trust-report" replace />} />

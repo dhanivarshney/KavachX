@@ -9,7 +9,7 @@ from app.core.config import get_settings
 from app.core.logging_config import configure_logging
 from app.exception_handlers import validation_exception_handler
 from app.middleware.request_context import RequestContextMiddleware
-from app.routers import analyze, diagnostics, explain, health, report, scans, stats, reputation, smishing
+from app.routers import analyze, diagnostics, explain, health, report, scans, stats, reputation, smishing, damage_control
 from app.services.ml_service import warm_up_model
 
 configure_logging()
@@ -43,7 +43,7 @@ app.add_middleware(
         else None
     ),
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
     allow_headers=["Content-Type", "X-Request-ID", "X-Diagnostics-Token"],
     expose_headers=["X-Request-ID"],
 )
@@ -60,3 +60,4 @@ app.include_router(stats.router)
 app.include_router(scans.router)
 app.include_router(reputation.router)
 app.include_router(smishing.router)
+app.include_router(damage_control.router)

@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { NavLink } from "react-router-dom";
-import { ShieldCheck, Globe, MessageSquare, FileText, BarChart3, Menu, X, Activity } from "lucide-react";
+import { ShieldCheck, Globe, MessageSquare, FileText, BarChart3, Menu, X, Activity, ShieldAlert } from "lucide-react";
 import { BRANDING } from "../config/branding";
 import { getHealth } from "../api/phishlens";
 
@@ -36,6 +36,7 @@ export default function Navbar() {
     { name: "Web Scanner", path: "/", icon: Globe },
     { name: "SMS Guard", path: "/smishing", icon: MessageSquare },
     { name: "Trust Report", path: "/trust-report", icon: FileText },
+    { name: "SOS Recovery", path: "/damage-control", icon: ShieldAlert },
     { name: "Analytics", path: "/analytics", icon: BarChart3 },
   ];
 

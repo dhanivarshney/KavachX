@@ -222,3 +222,87 @@ export async function analyzeSmishing(message: string, sender_id?: string): Prom
   return res.json();
 }
 
+
+
+// ── Damage Control Mode ──────────────────────────────────────────
+
+export interface DamageControlAction {
+  id: string;
+  priority: number;
+  title: string;
+  detail: string;
+  completed: boolean;
+  completed_at: string | null;
+}
+
+export interface DamageControlHelpline {
+  name: string;
+  contact: string;
+  url: string;
+  note: string;
+}
+
+export interface DamageControlIncident {
+  incident_id: string;
+  incident_type: string;
+  incident_label: string;
+  severity?: "CRITICAL" | "HIGH" | "MODERATE" | string;
+  golden_hour?: boolean;
+  risk_summary?: string;
+  status: string;
+  created_at: string;
+  closed_at: string | null;
+  details?: Record<string, any>;
+  progress?: { total: number; completed: number; percentage: number };
+  actions: DamageControlAction[];
+  donts: string[];
+  helplines: DamageControlHelpline[];
+  disclaimer: string;
+}
+
+export interface IncidentTypeInfo {
+  key: string;
+  label: string;
+}
+
+export async function getIncidentTypes(): Promise<{ types: IncidentTypeInfo[] }> {
+  const res = await fetch(`${BASE}/api/damage-control/incident-types`);
+  if (!res.ok) throw new Error(`Failed to fetch incident types: ${res.status}`);
+  return res.json();
+}
+
+export async function createIncident(incident_type: string, channel?: string, details?: Record<string, any>): Promise<DamageControlIncident> {
+  const res = await fetch(`${BASE}/api/damage-control/incidents`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ incident_type, channel, details }),
+  });
+  if (!res.ok) throw new Error(`Failed to create incident: ${res.status}`);
+  return res.json();
+}
+
+export async function getIncident(incident_id: string): Promise<DamageControlIncident> {
+  const res = await fetch(`${BASE}/api/damage-control/incidents/${incident_id}`);
+  if (!res.ok) throw new Error(`Failed to fetch incident: ${res.status}`);
+  return res.json();
+}
+
+export async function toggleAction(incident_id: string, action_id: string): Promise<DamageControlIncident> {
+  const res = await fetch(`${BASE}/api/damage-control/incidents/${incident_id}/actions/${action_id}`, {
+    method: "PATCH",
+  });
+  if (!res.ok) throw new Error(`Failed to toggle action: ${res.status}`);
+  return res.json();
+}
+
+export async function closeIncident(incident_id: string): Promise<DamageControlIncident> {
+  const res = await fetch(`${BASE}/api/damage-control/incidents/${incident_id}/close`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`Failed to close incident: ${res.status}`);
+  return res.json();
+}
+
+export function getIncidentDossierUrl(incident_id: string): string {
+  return `${BASE}/api/damage-control/incidents/${incident_id}/dossier`;
+}
