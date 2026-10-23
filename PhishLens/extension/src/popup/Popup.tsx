@@ -57,20 +57,44 @@ export function Popup() {
       const results = await browser.scripting.executeScript({
         target: { tabId: tab.id },
         func: () => {
-          // ── Helper: find the EXPANDED / open message container ──────────
-          // Gmail renders open emails inside div.adn.ads (the expanded message wrapper)
-          // We scope ALL queries to this container so we never read sidebar/thread-list data.
+          // ════════════════════════════════════════════════════════════════
+          // KavachX Gmail Signal Extractor — reads EVERY available signal
+          // ════════════════════════════════════════════════════════════════
+
           const mainEl = document.querySelector("div[role='main']") as HTMLElement | null;
 
-          // The expanded message wrapper: Gmail uses div.adn.ads for the open message
+          // ── Find the EXPANDED / open message container ─────────────────
+          // Gmail wraps the expanded message in div.adn.ads
+          // If multiple emails in thread, pick the LAST one (most recent = open)
+          const allExpanded = mainEl?.querySelectorAll("div.adn.ads");
           const openMsg: HTMLElement | null =
-            mainEl?.querySelector("div.adn.ads") as HTMLElement ||
+            (allExpanded && allExpanded.length > 0
+              ? allExpanded[allExpanded.length - 1]
+              : null) as HTMLElement |
+            null ||
             mainEl?.querySelector("div[data-message-id]") as HTMLElement ||
             mainEl?.querySelector("div.h7") as HTMLElement ||
             mainEl;
 
-          // ── 1. Subject ──────────────────────────────────────────────────
-          // Priority: h2.hP in main > document.title (Gmail sets tab title to subject)
+          // ── SIGNAL 1: Is this email in Gmail's SPAM folder? ────────────
+          const hash = window.location.hash || "";
+          const isSpamFolder = hash.includes("#spam") || hash.includes("/spam") ||
+            document.title.toLowerCase().includes("spam");
+
+          // ── SIGNAL 2: Did Gmail flag this as phishing? ─────────────────
+          // Gmail shows a red warning box for known phishing emails
+          const gmailPhishingWarning = !!(
+            document.querySelector(".aH2 .Bs") ||         // classic phishing banner
+            document.querySelector("[data-tooltip*='phishing']") ||
+            document.querySelector(".md.nH.iY") ||        // spam warning header
+            document.querySelector(".Bs.nH.iY") ||        // alt spam warning
+            Array.from(document.querySelectorAll(".aH2")).some(
+              (el) => el.textContent?.toLowerCase().includes("phishing") ||
+                      el.textContent?.toLowerCase().includes("suspicious")
+            )
+          );
+
+          // ── SIGNAL 3: Subject ──────────────────────────────────────────
           const subjectEl =
             mainEl?.querySelector("h2.hP") ||
             mainEl?.querySelector("h2[data-thread-perm-id]") ||
@@ -79,40 +103,30 @@ export function Popup() {
 
           let subject = subjectEl?.textContent?.trim() || "";
           if (!subject) {
-            // Fallback: document.title = "Subject - Gmail" or "Subject - name@gmail.com - Gmail"
             const titleFull = document.title || "";
-            // Strip trailing Gmail suffix
             subject = titleFull
-              .replace(/\s*[-–]\s*(Gmail|Inbox|mail\.google\.com)[^-–]*$/, "")
+              .replace(/\s*[-–]\s*(Gmail|Inbox|Spam|mail\.google\.com)[^-–]*$/i, "")
               .trim();
           }
 
-          // ── 2. Sender ───────────────────────────────────────────────────
-          // Scope to openMsg so we get the CURRENT email's sender, not sidebar contacts
+          // ── SIGNAL 4: Sender (scoped to open message ONLY) ─────────────
           let senderEmail = "";
           let senderName = "";
 
-          // Strategy A: span[email] attribute (most reliable in Gmail)
-          // Query WITHIN the open message container first
+          // Strategy A: span[email] in open message wrapper (most reliable)
           const senderSpanInMsg =
             openMsg?.querySelector("span[email]") ||
             openMsg?.querySelector(".gD[email]");
           if (senderSpanInMsg) {
             senderEmail = senderSpanInMsg.getAttribute("email") || "";
-            senderName =
-              senderSpanInMsg.getAttribute("name") ||
-              senderSpanInMsg.textContent?.trim() ||
-              "";
+            senderName = senderSpanInMsg.getAttribute("name") || senderSpanInMsg.textContent?.trim() || "";
           }
 
-          // Strategy B: .gD selector scoped to open message
+          // Strategy B: .gD scoped to open message
           if (!senderEmail && openMsg) {
             const gdEl = openMsg.querySelector(".gD");
             if (gdEl) {
-              senderEmail =
-                gdEl.getAttribute("email") ||
-                gdEl.getAttribute("data-hovercard-id") ||
-                "";
+              senderEmail = gdEl.getAttribute("email") || gdEl.getAttribute("data-hovercard-id") || "";
               senderName = senderName || gdEl.textContent?.trim() || "";
             }
           }
@@ -126,47 +140,81 @@ export function Popup() {
             }
           }
 
-          // Strategy D: sender name from span.go or h3.iw scoped to open message
+          // Strategy D: display name fallback
           if (!senderName && openMsg) {
-            const nameEl =
-              openMsg.querySelector("span.go") ||
-              openMsg.querySelector("h3.iw") ||
-              openMsg.querySelector("span.gD");
+            const nameEl = openMsg.querySelector("span.go") || openMsg.querySelector("h3.iw") || openMsg.querySelector("span.gD");
             senderName = nameEl?.textContent?.trim() || "";
           }
 
-          // Strategy E: regex over the open message inner text ONLY (last resort)
+          // Strategy E: regex last resort over open message ONLY
           if (!senderEmail) {
             const msgText = openMsg?.innerText || mainEl?.innerText || "";
             const match = msgText.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
             if (match) senderEmail = match[0];
           }
 
-          // ── 3. Body ─────────────────────────────────────────────────────
-          // Scope to the open message container
+          // ── SIGNAL 5: "via" third-party sending domain ─────────────────
+          // Gmail shows "Sender Name via thirdpartydomain.com" for relayed mail
+          // This appears in span.go or the sender header area
+          let viaDomain = "";
+          if (openMsg) {
+            const headerArea = openMsg.querySelector(".gE.iv.gt") || openMsg.querySelector(".g2") || openMsg;
+            const headerText = (headerArea as HTMLElement)?.innerText || "";
+            const viaMatch = headerText.match(/via\s+([a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/i);
+            if (viaMatch) viaDomain = viaMatch[1].toLowerCase();
+
+            // Also check the "mailed-by" / "signed-by" span
+            const mailedBy = openMsg.querySelector("[data-tooltip*='Mailed by']") ||
+                             openMsg.querySelector(".go");
+            if (!viaDomain && mailedBy) {
+              const mbText = mailedBy.getAttribute("data-tooltip") || mailedBy.textContent || "";
+              const mbMatch = mbText.match(/(?:mailed|signed|via)\s+by\s+([a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/i);
+              if (mbMatch) viaDomain = mbMatch[1].toLowerCase();
+            }
+          }
+
+          // ── SIGNAL 6: Reply-To (different from sender = major phishing signal) ──
+          let replyTo = "";
+          if (openMsg) {
+            // Gmail sometimes shows the reply-to in the expanded headers
+            const allEmailAttrs = openMsg.querySelectorAll("[email]");
+            allEmailAttrs.forEach((el) => {
+              const e = el.getAttribute("email") || "";
+              if (e && e !== senderEmail && e.includes("@")) {
+                replyTo = replyTo || e; // first different email = likely reply-to
+              }
+            });
+          }
+
+          // ── SIGNAL 7: Body text ─────────────────────────────────────────
           const bodyEl: HTMLElement | null =
             openMsg?.querySelector("div.a3s") as HTMLElement ||
             openMsg?.querySelector(".a3s.aiL") as HTMLElement ||
-            openMsg?.querySelector("div.ii.gt") as HTMLElement ||
+            openMsg?.querySelector("div.ii.gt div") as HTMLElement ||
             document.querySelector("div.a3s") as HTMLElement ||
             document.querySelector("div[aria-label='Message body']") as HTMLElement;
 
-          const bodySnippet = bodyEl?.innerText?.slice(0, 1500) || "";
+          const bodySnippet = bodyEl?.innerText?.slice(0, 2000) || "";
 
-          // ── 4. Links ────────────────────────────────────────────────────
+          // ── SIGNAL 8: Embedded links ────────────────────────────────────
           const links: string[] = [];
           if (bodyEl) {
             bodyEl.querySelectorAll("a[href]").forEach((a) => {
               const href = (a as HTMLAnchorElement).href;
-              if (
-                href &&
-                (href.startsWith("http://") || href.startsWith("https://")) &&
-                !href.includes("mail.google.com") &&
-                !href.includes("outlook.live.com")
-              ) {
+              if (href && (href.startsWith("http://") || href.startsWith("https://")) &&
+                  !href.includes("mail.google.com") && !href.includes("outlook.live.com")) {
                 links.push(href);
               }
             });
+          }
+
+          // ── SIGNAL 9: Attachments with dangerous extensions ─────────────
+          const dangerousAttachExt = [".exe", ".zip", ".rar", ".bat", ".cmd", ".scr", ".js", ".vbs", ".apk"];
+          let hasDangerousAttachment = false;
+          const attachArea = openMsg?.querySelector("div.aQH") || document.querySelector("div.aQH");
+          if (attachArea) {
+            const attachText = (attachArea as HTMLElement).innerText?.toLowerCase() || "";
+            hasDangerousAttachment = dangerousAttachExt.some((ext) => attachText.includes(ext));
           }
 
           return {
@@ -176,9 +224,16 @@ export function Popup() {
             subject,
             bodySnippet,
             links,
+            // Extra Gmail-native signals
+            isSpamFolder,
+            gmailPhishingWarning,
+            viaDomain,
+            replyTo,
+            hasDangerousAttachment,
           };
         },
       });
+
 
       const extracted = results?.[0]?.result as
         | {
@@ -188,6 +243,11 @@ export function Popup() {
             subject: string;
             bodySnippet: string;
             links: string[];
+            isSpamFolder: boolean;
+            gmailPhishingWarning: boolean;
+            viaDomain: string;
+            replyTo: string;
+            hasDangerousAttachment: boolean;
           }
         | undefined;
 
@@ -202,6 +262,8 @@ export function Popup() {
         senderEmail: extracted.senderEmail || "",
         subject: extracted.subject || "(No Subject)",
         linksCount: extracted.links.length,
+        isSpamFolder: extracted.isSpamFolder,
+        gmailFlagged: extracted.gmailPhishingWarning,
       };
       setEmailMeta(meta);
 
@@ -216,6 +278,12 @@ export function Popup() {
             subject: meta.subject,
             body_snippet: extracted.bodySnippet,
             links: extracted.links,
+            // Gmail-native signals
+            is_spam_folder: extracted.isSpamFolder,
+            gmail_flagged_phishing: extracted.gmailPhishingWarning,
+            via_domain: extracted.viaDomain,
+            reply_to: extracted.replyTo,
+            has_dangerous_attachment: extracted.hasDangerousAttachment,
           }),
         });
 
@@ -532,32 +600,47 @@ export function Popup() {
                     { key: "sender_domain_signals", label: "Sender Domain" },
                     { key: "subject_signals", label: "Subject" },
                     { key: "body_language_signals", label: "Body Language" },
+                    { key: "gmail_context_signals", label: "Gmail Context" },
                     { key: "link_threat_signals", label: "Embedded Links" },
                   ].map(({ key, label }) => {
                     const val = (emailAnalysis.signal_breakdown as any)[key] as number;
-                    const pct = Math.min((val / 45) * 100, 100);
-                    const barColor = val >= 25 ? "#be123c" : val >= 10 ? "#d97706" : "#16a34a";
+                    const pct = Math.min((val / 50) * 100, 100);
+                    const barColor = val >= 25 ? "#be123c" : val >= 10 ? "#d97706" : val > 0 ? "#2563eb" : "#16a34a";
                     return (
                       <div key={key} style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "3px" }}>
-                        <span style={{ width: "85px", flexShrink: 0, color: "#475569" }}>{label}</span>
+                        <span style={{ width: "90px", flexShrink: 0, color: "#475569", fontSize: "10px" }}>{label}</span>
                         <div style={{ flex: 1, height: "5px", background: "#e2e8f0", borderRadius: "9999px", overflow: "hidden" }}>
                           <div style={{ width: `${pct}%`, height: "100%", background: barColor, borderRadius: "9999px" }} />
                         </div>
-                        <span style={{ width: "22px", textAlign: "right", fontWeight: 700, color: barColor }}>{val}</span>
+                        <span style={{ width: "24px", textAlign: "right", fontWeight: 700, color: barColor, fontSize: "10px" }}>{val}</span>
                       </div>
                     );
                   })}
                 </div>
               )}
 
+
               {/* Sender info */}
               {emailMeta && (
                 <div style={{ background: "#f1f5f9", borderRadius: "7px", padding: "7px 9px", lineHeight: 1.5 }}>
                   <div><strong>From:</strong> {emailMeta.senderName || "—"} &lt;{emailMeta.senderEmail || "unknown"}&gt;</div>
                   <div><strong>Subject:</strong> {emailMeta.subject || "(No Subject)"}</div>
-                  <div><strong>Links found:</strong> {emailMeta.linksCount}</div>
+                  <div style={{ display: "flex", gap: "6px", marginTop: "4px", flexWrap: "wrap" }}>
+                    <span><strong>Links:</strong> {emailMeta.linksCount}</span>
+                    {emailMeta.isSpamFolder && (
+                      <span style={{ padding: "1px 7px", borderRadius: "9999px", background: "#fef3c7", color: "#92400e", fontSize: "10px", fontWeight: 700 }}>
+                        📂 In Spam Folder
+                      </span>
+                    )}
+                    {emailMeta.gmailFlagged && (
+                      <span style={{ padding: "1px 7px", borderRadius: "9999px", background: "#ffe4e6", color: "#be123c", fontSize: "10px", fontWeight: 700 }}>
+                        🚩 Gmail Flagged Phishing
+                      </span>
+                    )}
+                  </div>
                 </div>
               )}
+
 
               {/* Spoofing warning */}
               {emailAnalysis.sender_audit?.is_spoofed && (
