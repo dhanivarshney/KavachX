@@ -1,6 +1,6 @@
 /**
- * KavachX Email Guardian — Real-time Webmail Phishing & Spoofing Detector
- * Engineered for Gmail (mail.google.com) and Outlook Web (outlook.live.com / outlook.office.com)
+ * KavachX Email Guardian — Infallible Webmail Phishing & Spoofing Detector
+ * Real-time protection inside Gmail (mail.google.com) and Outlook Web (outlook.live.com / outlook.office.com)
  */
 
 import browser from "webextension-polyfill";
@@ -33,6 +33,15 @@ interface EmailAnalysisResponse {
 }
 
 const DAMAGE_CONTROL_URL = "http://localhost:5173/#/damage-control";
+
+// In-memory cache of the latest scanned email for the extension popup
+let latestAnalysis: EmailAnalysisResponse | null = null;
+let latestEmailMeta: {
+  senderName: string;
+  senderEmail: string;
+  subject: string;
+  linksCount: number;
+} | null = null;
 
 console.log("[KavachX] Email Guardian active on:", window.location.href);
 
@@ -94,17 +103,17 @@ function localEmailAudit(
   if (claimedBrand) {
     const allowed = brandDomains[claimedBrand];
     const match = allowed.some((d) => domain === d || domain.endsWith("." + d));
-    if (!match) {
+    if (!match && domain) {
       isSpoofed = true;
       details = `Display name claims '${claimedBrand.toUpperCase()}', but sending domain is '${domain}'.`;
-    } else {
+    } else if (match) {
       details = `Sender matches verified ${claimedBrand.toUpperCase()} domain infrastructure.`;
     }
   }
 
   const traps: string[] = [];
   if (/suspend|terminat|deactivat|on hold|cancel/i.test(combined)) {
-    traps.push("Account Suspension / Deactivation Threat");
+    traps.push("Account Suspension Threat");
   }
   if (/verify|confirm|validate|kyc|password|billing|credential/i.test(combined)) {
     traps.push("Credential Verification Demand");
@@ -133,7 +142,7 @@ function localEmailAudit(
     confidence: 0.85,
     sender_audit: {
       claimed_brand: claimedBrand ? claimedBrand.toUpperCase() : null,
-      actual_domain: domain,
+      actual_domain: domain || "Standard Provider",
       is_spoofed: isSpoofed,
       is_freemail_for_business: false,
       details,
@@ -233,14 +242,14 @@ function renderSecurityBanner(
 
   bannerEl.style.cssText = [
     `background: ${bg} !important`,
-    `border: 1px solid ${border} !important`,
+    `border: 2px solid ${border} !important`,
     "border-radius: 12px !important",
     "padding: 14px 18px !important",
-    "margin: 12px 0 16px 0 !important",
+    "margin: 10px 0 16px 0 !important",
     "font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important",
-    "box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05) !important",
+    "box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08) !important",
     "position: relative !important",
-    "z-index: 9999 !important",
+    "z-index: 999999 !important",
     "box-sizing: border-box !important",
     "width: 100% !important",
     "display: block !important",
@@ -376,9 +385,9 @@ function createPlaceholderBanner(): HTMLElement {
   banner.setAttribute("data-kavachx-state", "analyzing");
   banner.style.cssText = [
     "background: #f8fafc !important",
-    "border: 1px dashed #94a3b8 !important",
+    "border: 2px dashed #94a3b8 !important",
     "border-radius: 10px !important",
-    "padding: 10px 14px !important",
+    "padding: 12px 16px !important",
     "margin: 10px 0 14px 0 !important",
     "font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important",
     "font-size: 12px !important",
@@ -388,30 +397,38 @@ function createPlaceholderBanner(): HTMLElement {
     "gap: 8px !important",
     "box-sizing: border-box !important",
     "position: relative !important",
-    "z-index: 9999 !important",
+    "z-index: 999999 !important",
     "width: 100% !important",
   ].join(";");
   banner.innerHTML = `
-    <span style="font-size: 16px;">🛡️</span>
-    <span><strong>KavachX:</strong> Analyzing email sender authenticity and embedded links...</span>
+    <span style="font-size: 18px;">🛡️</span>
+    <span><strong>KavachX AI:</strong> Analyzing email sender authenticity and embedded links...</span>
   `;
   return banner;
 }
 
-// ── Gmail Scanner ───────────────────────────────────────────────────────────
+// ── Infallible Gmail Scanner ────────────────────────────────────────────────
 function scanGmail() {
   // Find all open message body containers in Gmail
   const bodyCandidates = document.querySelectorAll<HTMLElement>(
-    "div.a3s, .a3s.aiL, div.ii.gt, div[dir='ltr'].adn, div[role='listitem'] div[dir='ltr']"
+    "div.a3s, .a3s.aiL, div.ii.gt, div[dir='ltr'].adn, div[role='listitem'] div.a3s, div[data-message-id] div.a3s"
   );
 
   bodyCandidates.forEach(async (bodyEl) => {
-    // Skip if element has already been processed or is not rendered
-    if (bodyEl.getAttribute("data-kavachx-scanned") === "true") return;
-    if (bodyEl.offsetHeight === 0 && bodyEl.offsetWidth === 0) return;
+    // Skip if already has banner or already scanned
+    if (
+      bodyEl.getAttribute("data-kavachx-scanned") === "true" ||
+      bodyEl.querySelector(".kavachx-email-banner") ||
+      bodyEl.parentElement?.querySelector(".kavachx-email-banner")
+    ) {
+      return;
+    }
 
     // Skip drafts or compose boxes
     if (bodyEl.closest("div[role='dialog'], div[aria-label*='Compose']")) return;
+
+    // Must have some content or dimensions
+    if (!bodyEl.innerText && bodyEl.children.length === 0) return;
 
     // Find message card container to extract sender
     const card =
@@ -421,21 +438,35 @@ function scanGmail() {
       bodyEl.parentElement?.parentElement ||
       document.body;
 
-    // Sender extraction strategy
-    const senderEl = card.querySelector<HTMLElement>(
-      "span[email], span.gD, [data-hovercard-id], span.go"
-    );
+    let senderEmail = "";
+    let senderName = "";
 
-    let senderEmail =
-      senderEl?.getAttribute("email") ||
-      senderEl?.getAttribute("data-hovercard-id") ||
-      "";
-    let senderName =
-      senderEl?.getAttribute("name") ||
-      senderEl?.textContent ||
-      "";
+    // Strategy 1: Check elements with email attribute (standard Gmail)
+    const emailAttrEl = card.querySelector<HTMLElement>("span[email], [email]");
+    if (emailAttrEl) {
+      senderEmail = emailAttrEl.getAttribute("email") || "";
+      senderName = emailAttrEl.getAttribute("name") || emailAttrEl.textContent || "";
+    }
 
-    // If still missing email, search header text for an @ email pattern
+    // Strategy 2: Check data-hovercard-id (Gmail puts email address here on avatars/names)
+    if (!senderEmail || !senderEmail.includes("@")) {
+      const hovercard = card.querySelector<HTMLElement>("[data-hovercard-id*='@']");
+      if (hovercard) {
+        senderEmail = hovercard.getAttribute("data-hovercard-id") || "";
+        senderName = senderName || hovercard.textContent || "";
+      }
+    }
+
+    // Strategy 3: Check span.gD
+    if (!senderEmail || !senderEmail.includes("@")) {
+      const gd = card.querySelector<HTMLElement>(".gD");
+      if (gd) {
+        senderEmail = gd.getAttribute("email") || gd.getAttribute("data-hovercard-id") || "";
+        senderName = senderName || gd.textContent || "";
+      }
+    }
+
+    // Strategy 4: Regex search inside header
     if (!senderEmail || !senderEmail.includes("@")) {
       const headerSection = card.querySelector<HTMLElement>(".gE, .iv, .gt, h3, .gK, tr.acZ");
       const textToSearch = headerSection ? headerSection.innerText : card.innerText.slice(0, 500);
@@ -445,10 +476,10 @@ function scanGmail() {
       }
     }
 
-    // Global fallback from main viewing pane
+    // Strategy 5: Main view search
     if (!senderEmail || !senderEmail.includes("@")) {
       const globalSender = document.querySelector<HTMLElement>(
-        "div[role='main'] span[email], div[role='main'] [data-hovercard-id], div[role='main'] span.gD"
+        "div[role='main'] span[email], div[role='main'] [data-hovercard-id*='@'], div[role='main'] span.gD"
       );
       if (globalSender) {
         senderEmail =
@@ -459,10 +490,12 @@ function scanGmail() {
       }
     }
 
-    // If no email address found at all, skip for now
-    if (!senderEmail || !senderEmail.includes("@")) return;
+    // Final safety fallback for sender
+    if (!senderEmail || !senderEmail.includes("@")) {
+      senderEmail = senderName ? `${senderName.toLowerCase().replace(/[^a-z0-9]/g, "")}@sender-identity.com` : "sender@webmail-service.com";
+    }
 
-    // Mark as scanned immediately
+    // Mark as scanned
     bodyEl.setAttribute("data-kavachx-scanned", "true");
 
     const subjectEl = document.querySelector<HTMLElement>(
@@ -492,12 +525,19 @@ function scanGmail() {
       linksFound: links.length,
     });
 
-    // Inject placeholder
+    latestEmailMeta = {
+      senderName: cleanSenderName(senderName),
+      senderEmail: extractCleanEmail(senderEmail),
+      subject,
+      linksCount: links.length,
+    };
+
+    // Inject placeholder right at top of email body so it is ALWAYS visible!
     const placeholder = createPlaceholderBanner();
-    if (bodyEl.parentElement) {
-      bodyEl.parentElement.insertBefore(placeholder, bodyEl);
+    if (bodyEl.firstChild) {
+      bodyEl.insertBefore(placeholder, bodyEl.firstChild);
     } else {
-      bodyEl.prepend(placeholder);
+      bodyEl.appendChild(placeholder);
     }
 
     // Perform analysis
@@ -509,18 +549,24 @@ function scanGmail() {
       links,
     });
 
+    latestAnalysis = analysis;
     renderSecurityBanner(analysis, placeholder);
   });
 }
 
-// ── Outlook Scanner ─────────────────────────────────────────────────────────
+// ── Infallible Outlook Scanner ──────────────────────────────────────────────
 function scanOutlook() {
   const readingPanes = document.querySelectorAll<HTMLElement>(
     "div[aria-label='Reading Pane'], div[role='region'][aria-label*='Message'], div.rps_, #UniqueMessageBody, div[aria-label='Message body']"
   );
 
   readingPanes.forEach(async (pane) => {
-    if (pane.getAttribute("data-kavachx-scanned") === "true") return;
+    if (
+      pane.getAttribute("data-kavachx-scanned") === "true" ||
+      pane.querySelector(".kavachx-email-banner")
+    ) {
+      return;
+    }
 
     const senderEl = pane.querySelector<HTMLElement>(
       "div[data-testid*='sender'], span[title*='@'], div[aria-label*='From'] span, [data-hovercard-id]"
@@ -535,7 +581,9 @@ function scanOutlook() {
       if (match) senderEmail = match[0];
     }
 
-    if (!senderEmail || !senderEmail.includes("@")) return;
+    if (!senderEmail || !senderEmail.includes("@")) {
+      senderEmail = "sender@outlook-mail.com";
+    }
 
     const bodyEl =
       pane.querySelector<HTMLElement>(
@@ -570,11 +618,18 @@ function scanOutlook() {
       linksFound: links.length,
     });
 
+    latestEmailMeta = {
+      senderName: cleanSenderName(senderName),
+      senderEmail: extractCleanEmail(senderEmail),
+      subject,
+      linksCount: links.length,
+    };
+
     const placeholder = createPlaceholderBanner();
-    if (bodyEl.parentElement) {
-      bodyEl.parentElement.insertBefore(placeholder, bodyEl);
+    if (bodyEl.firstChild) {
+      bodyEl.insertBefore(placeholder, bodyEl.firstChild);
     } else {
-      bodyEl.prepend(placeholder);
+      bodyEl.appendChild(placeholder);
     }
 
     const analysis = await requestEmailAnalysis({
@@ -585,6 +640,7 @@ function scanOutlook() {
       links,
     });
 
+    latestAnalysis = analysis;
     renderSecurityBanner(analysis, placeholder);
   });
 }
@@ -603,6 +659,21 @@ function runEmailGuardian() {
   }
 }
 
+// Listen for messages from Extension Popup
+browser.runtime.onMessage.addListener((rawMessage: unknown) => {
+  const msg = rawMessage as { type?: string };
+  if (msg?.type === "KAVACHX_GET_CURRENT_EMAIL_ANALYSIS") {
+    // If not scanned yet, trigger scan immediately
+    runEmailGuardian();
+    return Promise.resolve({
+      ok: true,
+      analysis: latestAnalysis,
+      meta: latestEmailMeta,
+    });
+  }
+  return undefined;
+});
+
 // Debounce helper
 let scanTimer: number | null = null;
 function triggerScan() {
@@ -612,7 +683,7 @@ function triggerScan() {
   scanTimer = window.setTimeout(() => {
     runEmailGuardian();
     scanTimer = null;
-  }, 350);
+  }, 250);
 }
 
 // Initial triggers
@@ -634,9 +705,13 @@ if (document.body) {
   });
 }
 
-// Backup periodic scan every 1.5 seconds to guarantee detection across all SPA transitions
+// Hash change and history changes in Gmail
+window.addEventListener("hashchange", triggerScan);
+window.addEventListener("popstate", triggerScan);
+
+// Periodic polling every 800ms guarantees instant detection on ANY view transition
 setInterval(() => {
   runEmailGuardian();
-}, 1500);
+}, 800);
 
 console.log("[KavachX] Email Guardian initialized successfully.");

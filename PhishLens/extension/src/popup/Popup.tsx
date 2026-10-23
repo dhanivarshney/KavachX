@@ -28,6 +28,9 @@ export function Popup() {
   const [error, setError] = useState<string | null>(null);
   const [feedbackStatus, setFeedbackStatus] = useState<string | null>(null);
   const [reportStatus, setReportStatus] = useState<string | null>(null);
+  const [isWebmailTab, setIsWebmailTab] = useState(false);
+  const [emailAnalysis, setEmailAnalysis] = useState<any | null>(null);
+  const [emailMeta, setEmailMeta] = useState<any | null>(null);
 
   useEffect(() => {
     void runAnalysis();
@@ -36,6 +39,22 @@ export function Popup() {
   const statusText = analysis ? labelText(analysis.label) : "Checking";
   const statusSymbol = analysis ? labelSymbol(analysis.label) : null;
   const signalGroups = analysis ? groupReasonsBySignal(analysis.reasons, analysis.sources, analysis.risk_breakdown) : [];
+
+  async function scanWebmailEmail() {
+    try {
+      const tab = await getActiveTab();
+      if (!tab?.id) return;
+      const res = (await browser.tabs.sendMessage(tab.id, {
+        type: "KAVACHX_GET_CURRENT_EMAIL_ANALYSIS",
+      })) as { ok?: boolean; analysis?: any; meta?: any } | undefined;
+      if (res?.analysis) {
+        setEmailAnalysis(res.analysis);
+        setEmailMeta(res.meta);
+      }
+    } catch {
+      //
+    }
+  }
 
   async function runAnalysis() {
     setLoading(true);
@@ -46,6 +65,29 @@ export function Popup() {
       const url = tab?.url;
       const currentSettings = await getExtensionSettings();
       setSettings(currentSettings);
+
+      const isWebmail = Boolean(
+        url &&
+          (url.includes("mail.google.com") ||
+            url.includes("outlook.live.com") ||
+            url.includes("outlook.office.com") ||
+            url.includes("outlook.office365.com"))
+      );
+      setIsWebmailTab(isWebmail);
+
+      if (isWebmail && tab?.id) {
+        try {
+          const res = (await browser.tabs.sendMessage(tab.id, {
+            type: "KAVACHX_GET_CURRENT_EMAIL_ANALYSIS",
+          })) as { ok?: boolean; analysis?: any; meta?: any } | undefined;
+          if (res?.analysis) {
+            setEmailAnalysis(res.analysis);
+            setEmailMeta(res.meta);
+          }
+        } catch {
+          //
+        }
+      }
 
       if (!tab?.id || !url || !url.startsWith("http")) {
         setError("This page cannot be analyzed by the extension.");
@@ -150,6 +192,164 @@ export function Popup() {
 
       {error ? <div className="notice">{error}</div> : null}
       {analysis ? <div className={`mode-banner ${analysis.mode}`}>{modeBannerText(analysis)}</div> : null}
+
+      {isWebmailTab && (
+        <section
+          style={{
+            margin: "10px 0 14px",
+            padding: "14px",
+            borderRadius: "10px",
+            background:
+              emailAnalysis?.risk_label === "dangerous"
+                ? "#fff1f2"
+                : emailAnalysis?.risk_label === "suspicious"
+                ? "#fffbeb"
+                : "#f0fdf4",
+            border: `1.5px solid ${
+              emailAnalysis?.risk_label === "dangerous"
+                ? "#fecdd3"
+                : emailAnalysis?.risk_label === "suspicious"
+                ? "#fde68a"
+                : "#bbf7d0"
+            }`,
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              marginBottom: "8px",
+            }}
+          >
+            <span
+              style={{
+                fontSize: "12px",
+                fontWeight: 700,
+                color: "#0f172a",
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+              }}
+            >
+              <span>✉️</span>
+              <span>Webmail Phishing Guard</span>
+            </span>
+            <button
+              type="button"
+              onClick={scanWebmailEmail}
+              style={{
+                fontSize: "11px",
+                fontWeight: 600,
+                background: "#2563eb",
+                color: "#fff",
+                border: "none",
+                borderRadius: "5px",
+                padding: "3px 8px",
+                cursor: "pointer",
+              }}
+            >
+              🔄 Scan Open Email
+            </button>
+          </div>
+
+          {emailAnalysis ? (
+            <div
+              style={{
+                fontSize: "11px",
+                color: "#334155",
+                display: "flex",
+                flexDirection: "column",
+                gap: "6px",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                }}
+              >
+                <span>
+                  <strong>Status:</strong> {emailAnalysis.safety_summary}
+                </span>
+                <span
+                  style={{
+                    padding: "2px 7px",
+                    borderRadius: "9999px",
+                    fontWeight: 800,
+                    fontSize: "10px",
+                    background:
+                      emailAnalysis.risk_label === "dangerous"
+                        ? "#ffe4e6"
+                        : emailAnalysis.risk_label === "suspicious"
+                        ? "#fef3c7"
+                        : "#dcfce7",
+                    color:
+                      emailAnalysis.risk_label === "dangerous"
+                        ? "#be123c"
+                        : emailAnalysis.risk_label === "suspicious"
+                        ? "#b45309"
+                        : "#15803d",
+                  }}
+                >
+                  Score {emailAnalysis.threat_score}/100
+                </span>
+              </div>
+              {emailMeta && (
+                <>
+                  <div>
+                    <strong>Sender:</strong> {emailMeta.senderName || "Unknown"} (
+                    {emailMeta.senderEmail})
+                  </div>
+                  <div>
+                    <strong>Subject:</strong> {emailMeta.subject || "No Subject"}
+                  </div>
+                  <div>
+                    <strong>Embedded Links:</strong> {emailMeta.linksCount} found
+                  </div>
+                </>
+              )}
+              {emailAnalysis.sender_audit?.is_spoofed && (
+                <div style={{ color: "#b91c1c", fontWeight: 700 }}>
+                  ⚠️ Impersonation: {emailAnalysis.sender_audit.details}
+                </div>
+              )}
+              {emailAnalysis.detected_traps?.length > 0 && (
+                <div style={{ color: "#9a3412", fontWeight: 600 }}>
+                  ⚡ Traps: {emailAnalysis.detected_traps.join(", ")}
+                </div>
+              )}
+              <div>
+                <strong>Advice:</strong> {emailAnalysis.ai_advice}
+              </div>
+              <div style={{ marginTop: "6px" }}>
+                <a
+                  href="http://localhost:5173/#/damage-control"
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{
+                    display: "inline-block",
+                    padding: "4px 10px",
+                    background: "#e11d48",
+                    color: "#fff",
+                    textDecoration: "none",
+                    borderRadius: "6px",
+                    fontSize: "10px",
+                    fontWeight: 700,
+                  }}
+                >
+                  🆘 Open SOS Incident Recovery
+                </a>
+              </div>
+            </div>
+          ) : (
+            <div style={{ fontSize: "11px", color: "#64748b", lineHeight: 1.4 }}>
+              Active on webmail. Open any email message in Gmail to view real-time phishing and spoofing analysis.
+            </div>
+          )}
+        </section>
+      )}
 
       <section
         className={`risk-panel ${analysis?.label ?? "safe"}`}
