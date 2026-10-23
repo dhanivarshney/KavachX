@@ -57,58 +57,103 @@ export function Popup() {
       const results = await browser.scripting.executeScript({
         target: { tabId: tab.id },
         func: () => {
-          // 1. Subject extraction
-          const subjectEl = document.querySelector(
-            "h2.hP, h2[data-thread-perm-id], div[role='main'] h2, [role='heading'][aria-level='1']"
-          );
-          const subject = subjectEl?.textContent?.trim() || "";
+          // ── Helper: find the EXPANDED / open message container ──────────
+          // Gmail renders open emails inside div.adn.ads (the expanded message wrapper)
+          // We scope ALL queries to this container so we never read sidebar/thread-list data.
+          const mainEl = document.querySelector("div[role='main']") as HTMLElement | null;
 
-          // 2. Sender extraction
+          // The expanded message wrapper: Gmail uses div.adn.ads for the open message
+          const openMsg: HTMLElement | null =
+            mainEl?.querySelector("div.adn.ads") as HTMLElement ||
+            mainEl?.querySelector("div[data-message-id]") as HTMLElement ||
+            mainEl?.querySelector("div.h7") as HTMLElement ||
+            mainEl;
+
+          // ── 1. Subject ──────────────────────────────────────────────────
+          // Priority: h2.hP in main > document.title (Gmail sets tab title to subject)
+          const subjectEl =
+            mainEl?.querySelector("h2.hP") ||
+            mainEl?.querySelector("h2[data-thread-perm-id]") ||
+            mainEl?.querySelector("h2") ||
+            document.querySelector("[role='heading'][aria-level='2']");
+
+          let subject = subjectEl?.textContent?.trim() || "";
+          if (!subject) {
+            // Fallback: document.title = "Subject - Gmail" or "Subject - name@gmail.com - Gmail"
+            const titleFull = document.title || "";
+            // Strip trailing Gmail suffix
+            subject = titleFull
+              .replace(/\s*[-–]\s*(Gmail|Inbox|mail\.google\.com)[^-–]*$/, "")
+              .trim();
+          }
+
+          // ── 2. Sender ───────────────────────────────────────────────────
+          // Scope to openMsg so we get the CURRENT email's sender, not sidebar contacts
           let senderEmail = "";
           let senderName = "";
 
-          const emailAttrEl = document.querySelector("span[email], [email]");
-          if (emailAttrEl) {
-            senderEmail = emailAttrEl.getAttribute("email") || "";
-            senderName = emailAttrEl.getAttribute("name") || emailAttrEl.textContent || "";
+          // Strategy A: span[email] attribute (most reliable in Gmail)
+          // Query WITHIN the open message container first
+          const senderSpanInMsg =
+            openMsg?.querySelector("span[email]") ||
+            openMsg?.querySelector(".gD[email]");
+          if (senderSpanInMsg) {
+            senderEmail = senderSpanInMsg.getAttribute("email") || "";
+            senderName =
+              senderSpanInMsg.getAttribute("name") ||
+              senderSpanInMsg.textContent?.trim() ||
+              "";
           }
 
-          if (!senderEmail || !senderEmail.includes("@")) {
-            const hovercards = Array.from(document.querySelectorAll("[data-hovercard-id*='@']"));
-            if (hovercards.length > 0) {
-              senderEmail = hovercards[0].getAttribute("data-hovercard-id") || "";
-              senderName = senderName || hovercards[0].textContent || "";
+          // Strategy B: .gD selector scoped to open message
+          if (!senderEmail && openMsg) {
+            const gdEl = openMsg.querySelector(".gD");
+            if (gdEl) {
+              senderEmail =
+                gdEl.getAttribute("email") ||
+                gdEl.getAttribute("data-hovercard-id") ||
+                "";
+              senderName = senderName || gdEl.textContent?.trim() || "";
             }
           }
 
-          if (!senderEmail || !senderEmail.includes("@")) {
-            const gd = document.querySelector(".gD");
-            if (gd) {
-              senderEmail = gd.getAttribute("email") || gd.getAttribute("data-hovercard-id") || "";
-              senderName = senderName || gd.textContent || "";
+          // Strategy C: data-hovercard-id scoped to open message
+          if (!senderEmail && openMsg) {
+            const hcEl = openMsg.querySelector("[data-hovercard-id*='@']");
+            if (hcEl) {
+              senderEmail = hcEl.getAttribute("data-hovercard-id") || "";
+              senderName = senderName || hcEl.textContent?.trim() || "";
             }
           }
 
-          if (!senderEmail || !senderEmail.includes("@")) {
-            const allText = (document.querySelector("div[role='main']") as HTMLElement)?.innerText || document.body.innerText;
-            const match = allText.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-            if (match) {
-              senderEmail = match[0];
-            }
+          // Strategy D: sender name from span.go or h3.iw scoped to open message
+          if (!senderName && openMsg) {
+            const nameEl =
+              openMsg.querySelector("span.go") ||
+              openMsg.querySelector("h3.iw") ||
+              openMsg.querySelector("span.gD");
+            senderName = nameEl?.textContent?.trim() || "";
           }
 
-          if (!senderName) {
-            const nameEl = document.querySelector("span.gD, h3.iw, span[name]");
-            senderName = nameEl?.getAttribute("name") || nameEl?.textContent?.trim() || "";
+          // Strategy E: regex over the open message inner text ONLY (last resort)
+          if (!senderEmail) {
+            const msgText = openMsg?.innerText || mainEl?.innerText || "";
+            const match = msgText.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
+            if (match) senderEmail = match[0];
           }
 
-          // 3. Body extraction
-          const bodyEl = document.querySelector(
-            "div.a3s, .a3s.aiL, div.ii.gt, div[aria-label='Message body'], #UniqueMessageBody, div.rps_"
-          );
-          const bodySnippet = (bodyEl as HTMLElement)?.innerText?.slice(0, 1500) || "";
+          // ── 3. Body ─────────────────────────────────────────────────────
+          // Scope to the open message container
+          const bodyEl: HTMLElement | null =
+            openMsg?.querySelector("div.a3s") as HTMLElement ||
+            openMsg?.querySelector(".a3s.aiL") as HTMLElement ||
+            openMsg?.querySelector("div.ii.gt") as HTMLElement ||
+            document.querySelector("div.a3s") as HTMLElement ||
+            document.querySelector("div[aria-label='Message body']") as HTMLElement;
 
-          // 4. Links extraction
+          const bodySnippet = bodyEl?.innerText?.slice(0, 1500) || "";
+
+          // ── 4. Links ────────────────────────────────────────────────────
           const links: string[] = [];
           if (bodyEl) {
             bodyEl.querySelectorAll("a[href]").forEach((a) => {
@@ -154,8 +199,8 @@ export function Popup() {
 
       const meta = {
         senderName: extracted.senderName || "Unknown Sender",
-        senderEmail: extracted.senderEmail || "notifications@service.com",
-        subject: extracted.subject || "Open Email",
+        senderEmail: extracted.senderEmail || "",
+        subject: extracted.subject || "(No Subject)",
         linksCount: extracted.links.length,
       };
       setEmailMeta(meta);
